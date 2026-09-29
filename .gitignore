@@ -1,0 +1,12 @@
+# GLOAI Mirror - gitignore
+*.iml
+.gradle/
+build/
+android/.gradle/
+android/local.properties
+android/app/build/
+wince/build/
+.DS_Store
+Thumbs.db
+*.log
+*.apk

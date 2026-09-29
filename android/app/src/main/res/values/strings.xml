@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">GLOAI 车机投屏</string>
+    <string name="hint_headunit_ip">车机 IP:端口（如 192.168.1.50:8686）</string>
+    <string name="btn_start">开始镜像</string>
+    <string name="btn_stop">停止</string>
+    <string name="status_idle">未连接</string>
+    <string name="status_connecting">连接中…</string>
+    <string name="status_streaming">镜像中</string>
+    <string name="toast_enable_a11y">请在系统设置中开启「GLOAI 车机投屏」无障碍服务以回注触摸</string>
+</resources>
