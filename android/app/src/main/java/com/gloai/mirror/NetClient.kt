@@ -41,6 +41,7 @@ class NetClient {
         return try {
             socket = accepted
             socket!!.soTimeout = 0 // 读循环自行按心跳判定断线
+            socket!!.tcpNoDelay = true // 关闭 Nagle：触摸/视频小包立即发出，降低交互延迟
             out = DataOutputStream(BufferedOutputStream(socket!!.getOutputStream()))
             `in` = DataInputStream(BufferedInputStream(socket!!.getInputStream()))
             running = true
