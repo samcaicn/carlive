@@ -96,13 +96,18 @@ class MirrorForegroundService : Service() {
 
     private fun startCore() {
         // 在已是 mediaProjection 前台服务的前提下获取 MediaProjection（Android 14 强制要求）。
-        if (hasProjectionData && pendingData != null && MirrorState.mediaProjection == null) {
-            try {
-                val mgr = getSystemService(MediaProjectionManager::class.java)
-                MirrorState.mediaProjection = mgr.getMediaProjection(pendingResultCode, pendingData)
-                Log.i(TAG, "MediaProjection acquired inside foreground service")
-            } catch (e: Exception) {
-                Log.e(TAG, "getMediaProjection failed: ${e.message}")
+        // pendingData/pendingResultCode 是 var，Kotlin 无法智能转型，先捕获到局部 val。
+        if (hasProjectionData && MirrorState.mediaProjection == null) {
+            val data = pendingData
+            val rc = pendingResultCode
+            if (data != null) {
+                try {
+                    val mgr = getSystemService(MediaProjectionManager::class.java)
+                    MirrorState.mediaProjection = mgr.getMediaProjection(rc, data)
+                    Log.i(TAG, "MediaProjection acquired inside foreground service")
+                } catch (e: Exception) {
+                    Log.e(TAG, "getMediaProjection failed: ${e.message}")
+                }
             }
             hasProjectionData = false
             pendingData = null
