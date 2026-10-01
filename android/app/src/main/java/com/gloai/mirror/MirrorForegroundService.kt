@@ -8,6 +8,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ServiceInfo
 import android.hardware.usb.UsbManager
 import android.net.ConnectivityManager
 import android.os.Build
@@ -46,7 +47,18 @@ class MirrorForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         createChannel()
-        startForeground(1, buildNotification("GLOAI 车机投屏 · 等待连接"))
+        val notification = buildNotification("GLOAI 车机投屏 · 等待连接")
+        // Android 14(API 34) 起：声明了 mediaProjection 类型的前台服务必须用 3 参数 startForeground，
+        // 否则抛 MissingForegroundServiceTypeException 直接闪退。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(
+                1, notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            startForeground(1, notification)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -140,7 +152,10 @@ class MirrorForegroundService : Service() {
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
             addAction("android.intent.action.USB_STATE")
         }
-        registerReceiver(usbReceiver, filter)
+        // Android 13(API 33) 起：动态注册接收器必须显式声明导出标志，否则 IllegalArgumentException 闪退。
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+            Context.RECEIVER_NOT_EXPORTED else 0
+        registerReceiver(usbReceiver, filter, flags)
     }
 
     /** 尽量自动开启 USB 网络共享（隐藏 API，best-effort，失败则提示用户手动开）。 */
