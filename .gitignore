@@ -10,3 +10,8 @@ wince/build/
 Thumbs.db
 *.log
 *.apk
+
+# QEMU 测试沙箱大文件（data.img 由 make-datadisk.sh 重新生成；NK 取自 wince-qemu-novnc-sandbox 技能 assets），不入仓
+qemu-test/images/data.img
+qemu-test/images/NK.bin.load-0x800010c0.raw
+qemu-test/images/NK.zip

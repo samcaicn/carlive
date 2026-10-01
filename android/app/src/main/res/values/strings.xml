@@ -1,11 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">GLOAI 车机投屏</string>
-    <string name="hint_headunit_ip">车机 IP:端口（如 192.168.1.50:8686）</string>
-    <string name="btn_start">开始镜像</string>
+    <string name="hint_auto_connect">零配置：打开本 App 并授权录屏后，车机端(GLOAI.exe)会自动发现并连接；USB 连接会自动开启网络共享。</string>
+    <string name="btn_start">启动投屏服务</string>
     <string name="btn_stop">停止</string>
-    <string name="status_idle">未连接</string>
-    <string name="status_connecting">连接中…</string>
-    <string name="status_streaming">镜像中</string>
+    <string name="status_idle">已停止</string>
+    <string name="status_waiting">等待车机连接…</string>
+    <string name="status_streaming">镜像中（已连接车机）</string>
+    <string name="status_need_perm">未授权录屏，无法推流</string>
     <string name="toast_enable_a11y">请在系统设置中开启「GLOAI 车机投屏」无障碍服务以回注触摸</string>
+    <string name="toast_need_media">需要录屏授权才能向车机推送画面</string>
+
+    <!-- 状态可见：触摸回注 / 录屏授权 / 连接 -->
+    <string name="btn_a11y">开启无障碍服务（触摸回注）</string>
+    <string name="touch_ready">触摸回注：已开启</string>
+    <string name="touch_off">触摸回注：未开启（车机点不了手机）</string>
+    <string name="media_ready">录屏授权：已获取</string>
+    <string name="media_off">录屏授权：未获取</string>
+    <string name="link_waiting">连接：等待车机…</string>
+    <string name="link_streaming">连接：已连接，镜像中</string>
+    <string name="link_idle">连接：未启动</string>
 </resources>

@@ -6,7 +6,7 @@ import android.hardware.display.VirtualDisplay
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
-import android.media.MediaProjection
+import android.media.projection.MediaProjection
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
@@ -34,7 +34,7 @@ class ScreenSender(
         thread.start()
         val handler = Handler(thread.looper)
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-            setInteger(MediaFormat.KEY_BITRATE, bitrate)
+            setInteger("bitrate", bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // 每秒一个关键帧，断线恢复快
@@ -68,7 +68,7 @@ class ScreenSender(
                     val isKey = isConfig || (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
                     // MediaCodec AVC 输出为 avcc，转 Annex-B 后车机 ffmpeg 才能解
                     val annexb = Protocol.avccToAnnexb(data)
-                    net.sendVideoFrame(if (isKey) 1 else 0, info.presentationTimeUs / 1000, annexb)
+                    net.sendVideoFrame(isKey, info.presentationTimeUs / 1000, annexb)
                 }
                 codec!!.releaseOutputBuffer(outIdx, false)
             } else if (outIdx == MediaCodec.INFO_TRY_AGAIN_LATER) {

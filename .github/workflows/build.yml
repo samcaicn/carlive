@@ -1,14 +1,14 @@
 name: Build GLOAI Mirror
 
-# 作用：CI 自动构建。Android 端可在此真实编译出 APK；
-# WinCE 端因需要 ARM CE 交叉工具链（Windows+VS2008+CE6 SDK），仅在 CI 做源/配置校验，
-# 真编译见 wince/README.md。本 workflow 即项目核心自动化资产。
-
 on:
   push:
-    branches: [wince, main, master]
+    branches: [android, main, master]
   pull_request:
-    branches: [wince, main, master]
+    branches: [android, main, master]
+
+env:
+  ANDROID_HOME: ${{ github.workspace }}/android-sdk
+  ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
 
 jobs:
   android:
@@ -16,43 +16,76 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses || true
-
+      - name: Install Android cmdline-tools + SDK platform/build-tools
+        run: |
+          mkdir -p "$ANDROID_HOME/cmdline-tools"
+          curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-12266719_latest.zip -o /tmp/cmdtools.zip
+          unzip -q /tmp/cmdtools.zip -d "$ANDROID_HOME/cmdline-tools"
+          mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0"
+      - name: Install Gradle 8.6 distribution
+        run: |
+          curl -fsSL https://services.gradle.org/distributions/gradle-8.6-bin.zip -o /tmp/gradle.zip
+          mkdir -p /opt/gradle
+          unzip -q /tmp/gradle.zip -d /opt/gradle
+          echo "/opt/gradle/gradle-8.6/bin" >> "$GITHUB_PATH"
+      - name: Point project at SDK
+        run: echo "sdk.dir=$ANDROID_HOME" > android/local.properties
       - name: Build release APK
-        uses: gradle/gradle-build-action@v3
-        with:
-          build-root-directory: android
-          gradle-version: "8.6"
-          arguments: assembleRelease
-
+        run: gradle -p android assembleRelease --no-daemon
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: gloai-mirror-android-apk
           path: android/app/build/outputs/apk/release/*.apk
 
-  wince-check:
-    name: WinCE source check
+  wince-build:
+    name: Build WinCE receiver (ARM)
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/enlyze/windows-ce-build-environment-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build GLOAI.exe with CeGCC (arm-mingw32ce, GCC 9.3)
+        run: |
+          cd wince
+          chmod +x build_wince.sh
+          ./build_wince.sh
+      - name: Verify PE is ARM WinCE
+        run: |
+          OD=/opt/cegcc-arm/bin/arm-mingw32ce-objdump
+          "$OD" -f wince/GLOAI.exe | grep -qi "architecture: arm" || { echo "ERROR: not ARM architecture"; exit 1; }
+          echo "ARM architecture: OK"
+          # 解析 PE 头：machine 在 pe+4，subsystem 在 pe+24+68（Windows CE = 9）
+          if command -v od >/dev/null 2>&1; then
+            pe=$(od -An -tu4 -j60 -N4 wince/GLOAI.exe | tr -d ' ')
+            subs=$(od -An -tu2 -j$((pe + 92)) -N2 wince/GLOAI.exe | tr -d ' ')
+            echo "subsystem=$subs (9 = Windows CE GUI)"
+            [ "$subs" = "9" ] || { echo "ERROR: subsystem is not 9 (Windows CE)"; exit 1; }
+          else
+            echo "od 不可用，仅做软性检查："; "$OD" -p wince/GLOAI.exe | grep -i subsystem || true
+          fi
+          echo "OK: ARM Windows CE PE produced"
+      - name: Upload WinCE exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: gloai-wince-exe
+          path: wince/GLOAI.exe
+
+  source-check:
+    name: Source sanity check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Verify WinCE sources present
+      - name: Verify sources present
         run: |
-          test -f wince/src/main.cpp
-          test -f wince/src/net.cpp
-          test -f wince/src/renderer.cpp
-          test -f wince/src/decoder.cpp
-          test -f wince/CMakeLists.txt
-          echo "WinCE sources OK."
-          echo "Native ARM build requires Windows + VS2008 + CE6 SDK (see wince/README.md)."
+          test -f android/app/build.gradle && echo "android app module OK"
+          test -f android/app/src/main/AndroidManifest.xml && echo "manifest OK"
+          test -f wince/src/decoder.cpp && echo "wince decoder OK"
+          test -f wince/src/nanojpeg.c && echo "nanojpeg vendored OK"

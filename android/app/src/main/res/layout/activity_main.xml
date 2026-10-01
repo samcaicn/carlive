@@ -9,15 +9,15 @@
         android:text="@string/app_name"
         android:textSize="20sp"
         android:textStyle="bold"
-        android:layout_marginBottom="16dp"
+        android:layout_marginBottom="8dp"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content" />
 
-    <EditText
-        android:id="@+id/etIp"
-        android:hint="@string/hint_headunit_ip"
-        android:inputType="textUri"
-        android:layout_width="match_parent"
+    <TextView
+        android:text="@string/hint_auto_connect"
+        android:textSize="13sp"
+        android:layout_marginBottom="16dp"
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content" />
 
     <Button
@@ -30,6 +30,15 @@
     <Button
         android:id="@+id/btnStop"
         android:text="@string/btn_stop"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
+    <!-- 无障碍未开启时才显示：跳系统设置手动开启（触摸回注的前提） -->
+    <Button
+        android:id="@+id/btnA11y"
+        android:text="@string/btn_a11y"
+        android:visibility="gone"
+        android:layout_marginTop="8dp"
         android:layout_width="match_parent"
         android:layout_height="wrap_content" />
 

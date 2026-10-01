@@ -26,7 +26,20 @@ class NetClient {
 
     fun connect(host: String, port: Int): Boolean {
         return try {
-            socket = Socket(host, port)
+            attach(Socket(host, port))
+        } catch (e: Exception) {
+            onLog?.invoke("connect fail: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * 复用已建立的 Socket（来自 ServerSocket.accept()）。车机端(本 App 作服务端)接受连接后调用。
+     * 与 connect() 共用同一套收发/心跳/触摸逻辑。
+     */
+    fun attach(accepted: Socket): Boolean {
+        return try {
+            socket = accepted
             socket!!.soTimeout = 0 // 读循环自行按心跳判定断线
             out = DataOutputStream(BufferedOutputStream(socket!!.getOutputStream()))
             `in` = DataInputStream(BufferedInputStream(socket!!.getInputStream()))
@@ -34,7 +47,7 @@ class NetClient {
             thread(name = "gloai-net-rx") { readLoop() }
             true
         } catch (e: Exception) {
-            onLog?.invoke("connect fail: ${e.message}")
+            onLog?.invoke("attach fail: ${e.message}")
             false
         }
     }

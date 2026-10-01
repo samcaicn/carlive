@@ -1,7 +1,7 @@
 #pragma once
 // decoder.h - 解码器：编码帧 → RGB32
-// V1 主路径 MJPEG（无需 ffmpeg，集成轻量 JPEG 解码器如 tinyjpeg/tjpgd）；
-// H264 为可选增强，需 ffmpegce（见 decoder.cpp 注释）。
+// V1 主路径 MJPEG，集成 NanoJPEG（vendor 到 src/nanojpeg.c，MIT）做微型 JPEG 解码；
+// H264 为可选增强，需 ffmpegce（见 decoder.cpp 注释，本版未实装）。
 #include <windows.h>
 #include <vector>
 

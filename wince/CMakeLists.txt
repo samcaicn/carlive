@@ -2,10 +2,11 @@ cmake_minimum_required(VERSION 3.10)
 project(WinCEClient CXX)
 
 # ============================================================================
-# 注意：本 CMakeLists 仅是「源码组织 + 依赖声明」。
-# WinCE 的官方/可用编译路径是 Windows + Visual Studio 2008 + Windows CE 6.0 SDK
-# + ARMv4I 交叉工具链（见 wince/README.md）。GitHub Actions 没有 WinCE 工具链，
-# 故 CI 只对 Android 端构建；WinCE 端在此处做静态检查/配置校验。
+# 源码组织 + 依赖声明。
+# WinCE 接收端的交叉编译由 wince/build_wince.sh 完成，使用 enlyze CeGCC
+#（arm-mingw32ce, GCC 9.3，容器 ghcr.io/enlyze/windows-ce-build-environment:arm），
+# 产出 ARM WinCE (subsystem 9) 的自包含可执行文件，可在 GitHub Actions 直接构建。
+# 本 CMakeLists 仍保留为「Windows + VS2008 + CE6 SDK」人工编译路径的参考。
 # ============================================================================
 
 set(SOURCES
@@ -18,8 +19,8 @@ set(SOURCES
 add_executable(WinCEClient WIN32 ${SOURCES})
 target_include_directories(WinCEClient PRIVATE src)
 
-# WinCE 链接 Winsock2（ws2.lib）；若启用 H264 需 avcodec/avutil/swscale；
-# 若启用 MJPEG 需把 tinyjpeg.c 加入 SOURCES 并链接其依赖。
+# WinCE 链接 Winsock2（ws2.lib）；MJPEG 解码器 NanoJPEG 已 #include 进 decoder.cpp，
+# 不需要额外链接；若启用 H264 需 avcodec/avutil/swscale（ffmpegce）。
 target_link_libraries(WinCEClient ws2)
 
 # ---- 可选增强（按需开启）----

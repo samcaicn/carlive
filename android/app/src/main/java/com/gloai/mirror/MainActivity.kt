@@ -1,11 +1,17 @@
 package com.gloai.mirror
 
+import android.accessibilityservice.AccessibilityServiceInfo
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
-import android.media.MediaProjectionManager
+import android.media.projection.MediaProjectionManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
+import android.view.View
+import android.view.accessibility.AccessibilityManager
 import android.widget.Button
-import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -14,50 +20,138 @@ import android.util.Log
 class MainActivity : AppCompatActivity() {
 
     private val REQ_MEDIA = 1001
-    private lateinit var etIp: EditText
     private lateinit var tvStatus: TextView
+    private var mediaRequested = false
+    private var a11yPromptedOnce = false   // 避免每次 onResume 都把用户弹到设置页
+
+    // 前台时低频刷新状态（车机连上的瞬间由服务侧驱动，界面需自行感知）
+    private val statusHandler = Handler(Looper.getMainLooper())
+    private val statusTick = object : Runnable {
+        override fun run() {
+            refreshStatus()
+            statusHandler.postDelayed(this, 2000)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        etIp = findViewById(R.id.etIp)
         tvStatus = findViewById(R.id.tvStatus)
-
-        val net = NetClient().also { n ->
-            n.onTouch = { action, x, y ->
-                runOnUiThread { MirrorAccessibilityService.instance?.injectTouch(x, y, action) }
-            }
-            n.onDisconnect = { runOnUiThread { tvStatus.text = "断开" } }
-            n.onLog = { m -> Log.d("GLOAI", m) }
-        }
-        MirrorState.net = net
 
         findViewById<Button>(R.id.btnStart).setOnClickListener { startMirror() }
         findViewById<Button>(R.id.btnStop).setOnClickListener { stopMirror() }
-    }
-
-    private fun startMirror() {
-        val target = etIp.text.toString().ifBlank { "192.168.1.50:8686" }
-        val (host, port) = parseTarget(target)
-        val net = MirrorState.net ?: return
-        if (!net.connect(host, port)) {
-            Toast.makeText(this, "连接车机失败，请检查 IP/端口与 WiFi", Toast.LENGTH_SHORT).show()
-            return
+        findViewById<Button>(R.id.btnA11y).setOnClickListener {
+            openAccessibilitySettings()
         }
-        net.sendHandshakePhone(maxW = 800, maxH = 480)
-        net.sendVideoConfig(Protocol.CODEC_H264, 1280, 720, 30, 3_000_000)
-        tvStatus.text = "连接中…"
+
+        // 首次进入即请求录屏授权，授权后自动启动投屏服务（车机端会被自动发现并连接）。
+        refreshStatus()
+        if (!isAccessibilityEnabled()) {
+            Toast.makeText(this, R.string.toast_enable_a11y, Toast.LENGTH_LONG).show()
+            openAccessibilitySettings()
+            a11yPromptedOnce = true
+        }
         requestMedia()
     }
 
-    private fun parseTarget(t: String): Pair<String, Int> {
-        val parts = t.split(":")
-        return parts[0] to (parts.getOrNull(1)?.toIntOrNull() ?: Protocol.PORT_DEFAULT)
+    override fun onResume() {
+        super.onResume()
+        // 从系统设置返回后重新判定：无障碍是否已开、录屏是否已授权
+        refreshStatus()
+        statusHandler.removeCallbacks(statusTick)
+        statusHandler.post(statusTick)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        statusHandler.removeCallbacks(statusTick)
+    }
+
+    private fun startMirror() {
+        requestMedia()
+    }
+
+    private fun stopMirror() {
+        startService(Intent(this, MirrorForegroundService::class.java).apply {
+            action = MirrorForegroundService.ACTION_STOP
+        })
+        refreshStatus()
+    }
+
+    private fun openAccessibilitySettings() {
+        startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+    }
+
+    /**
+     * 判定无障碍服务是否已在系统设置中启用。
+     * 不能用 MirrorAccessibilityService.instance 判空 —— 那是系统绑定服务后才赋值的（异步），
+     * 首次启动/刚开完设置时大概率还没绑定，会被误判成"未开启"。
+     * 这里以系统 Settings.Secure 的已启用列表为准，再用 AccessibilityManager 与运行期实例兜底。
+     */
+    private fun isAccessibilityEnabled(): Boolean {
+        val expected = ComponentName(this, MirrorAccessibilityService::class.java).flattenToString()
+
+        // 1) 系统已启用列表（权威）
+        val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+        if (!enabled.isNullOrEmpty()) {
+            for (token in enabled.split(":")) {
+                val t = token.trim()
+                if (t.equals(expected, ignoreCase = true)) return true
+                // 某些 ROM 存的是完整类名或 pkg/.Cls 变体
+                if (t.contains(packageName, ignoreCase = true) &&
+                    t.contains(MirrorAccessibilityService::class.java.simpleName, ignoreCase = true)
+                ) return true
+            }
+        }
+
+        // 2) AccessibilityManager 兜底
+        val am = getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
+        val infos = am?.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+        if (infos != null) {
+            for (info in infos) {
+                val si = info.resolveInfo?.serviceInfo ?: continue
+                if (si.packageName == packageName &&
+                    si.name == MirrorAccessibilityService::class.java.name
+                ) return true
+            }
+        }
+
+        // 3) 运行期实例（已绑定则必然已启用）
+        return MirrorAccessibilityService.instance != null
+    }
+
+    /** 把「触摸回注 / 录屏授权 / 连接」三项状态显式呈现，未开的给入口。 */
+    private fun refreshStatus() {
+        val a11y = isAccessibilityEnabled()
+        val media = MirrorState.mediaProjection != null
+
+        findViewById<Button>(R.id.btnA11y).visibility =
+            if (a11y) View.GONE else View.VISIBLE
+
+        val link = when {
+            MirrorState.net != null -> getString(R.string.link_streaming)
+            MirrorForegroundService.isRunning -> getString(R.string.link_waiting)
+            else -> getString(R.string.link_idle)
+        }
+
+        tvStatus.text = listOf(
+            if (a11y) getString(R.string.touch_ready) else getString(R.string.touch_off),
+            if (media) getString(R.string.media_ready) else getString(R.string.media_off),
+            link
+        ).joinToString("\n")
+
+        // 未开无障碍时只提示一次，避免反复弹设置页困住用户
+        if (!a11y && !a11yPromptedOnce) {
+            a11yPromptedOnce = true
+            Toast.makeText(this, R.string.toast_enable_a11y, Toast.LENGTH_LONG).show()
+        }
     }
 
     @Suppress("DEPRECATION")
     private fun requestMedia() {
+        if (mediaRequested) return
+        mediaRequested = true
         val mgr = getSystemService(MediaProjectionManager::class.java)
         startActivityForResult(mgr.createScreenCaptureIntent(), REQ_MEDIA)
     }
@@ -68,30 +162,24 @@ class MainActivity : AppCompatActivity() {
         if (requestCode == REQ_MEDIA && resultCode == RESULT_OK && data != null) {
             val mgr = getSystemService(MediaProjectionManager::class.java)
             MirrorState.mediaProjection = mgr.getMediaProjection(resultCode, data)
-            startForegroundMirror()
+            // 启动核心（信标 + 服务端 + USB 检测）
+            startService(Intent(this, MirrorForegroundService::class.java).apply {
+                action = MirrorForegroundService.ACTION_START
+            })
+            // 若车机已连上，立即起推流
+            startService(Intent(this, MirrorForegroundService::class.java).apply {
+                action = MirrorForegroundService.ACTION_START_SENDER
+            })
+            refreshStatus()
         } else {
-            tvStatus.text = "已取消录屏授权"
+            mediaRequested = false
+            Toast.makeText(this, R.string.toast_need_media, Toast.LENGTH_LONG).show()
+            refreshStatus()
         }
-    }
-
-    private fun startForegroundMirror() {
-        startService(Intent(this, MirrorForegroundService::class.java))
-        tvStatus.text = "镜像中（请确认已开启无障碍服务以回注触摸）"
-        if (MirrorAccessibilityService.instance == null) {
-            Toast.makeText(this, R.string.toast_enable_a11y, Toast.LENGTH_LONG).show()
-            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-        }
-    }
-
-    private fun stopMirror() {
-        MirrorState.net?.sendControl(Protocol.CTRL_BYE)
-        MirrorState.net?.close()
-        stopService(Intent(this, MirrorForegroundService::class.java))
-        tvStatus.text = "已停止"
     }
 
     override fun onDestroy() {
-        stopMirror()
         super.onDestroy()
+        Log.d("GLOAI", "MainActivity destroyed")
     }
 }
