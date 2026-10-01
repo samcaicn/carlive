@@ -6,6 +6,17 @@
 
 static const BYTE MAGIC[4] = { 0x47, 0x4C, 0x4F, 0x41 }; // "GLOA"
 
+#ifndef TCP_NODELAY
+#define TCP_NODELAY 0x1
+#endif
+
+// 关闭 Nagle：触摸/视频小包立即发出，降低交互延迟。
+static void setNoDelay(SOCKET s) {
+    if (s == INVALID_SOCKET) return;
+    int one = 1;
+    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
+}
+
 NetClient::NetClient() : m_sock(INVALID_SOCKET), m_codec(1) {
     WSADATA wsa = {0};
     WSAStartup(MAKEWORD(2,2), &wsa);
@@ -25,6 +36,7 @@ bool NetClient::connect(const std::wstring& host, int port) {
 
     m_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (m_sock == INVALID_SOCKET) return false;
+    setNoDelay(m_sock);
     if (::connect(m_sock, (SOCKADDR*)&sa, sizeof(sa)) == SOCKET_ERROR) {
         close(); return false;
     }
@@ -42,6 +54,7 @@ bool NetClient::connectTimeout(const std::wstring& host, int port, int timeoutMs
 
     SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET) return false;
+    setNoDelay(s);
 
     // 非阻塞 connect + select 超时
     u_long mode = 1;

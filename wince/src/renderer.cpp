@@ -3,7 +3,7 @@
 #include <windowsx.h>
 
 Renderer::Renderer(HWND hwnd)
-    : m_hwnd(hwnd), m_hdc(NULL), m_hbmp(NULL), m_bits(NULL),
+    : m_hwnd(hwnd), m_hdc(NULL), m_memDC(NULL), m_hbmp(NULL), m_bits(NULL),
       m_bmpW(0), m_bmpH(0), m_winW(0), m_winH(0) {
     m_hdc = GetDC(hwnd);
     RECT rc; GetClientRect(hwnd, &rc);
@@ -12,6 +12,7 @@ Renderer::Renderer(HWND hwnd)
 
 Renderer::~Renderer() {
     if (m_hbmp) DeleteObject(m_hbmp);
+    if (m_memDC) DeleteDC(m_memDC);
     if (m_hdc) ReleaseDC(m_hwnd, m_hdc);
 }
 
@@ -35,14 +36,14 @@ bool Renderer::present(const BYTE* rgb, int w, int h) {
     if (!m_hbmp || !m_bits) return false;
     memcpy(m_bits, rgb, (size_t)w * h * 4);
 
-    HDC mem = CreateCompatibleDC(m_hdc);
-    if (!mem) return false;
-    HBITMAP old = (HBITMAP)SelectObject(mem, m_hbmp);
+    // 复用内存 DC（首次创建一次），避免每帧 CreateCompatibleDC/DeleteDC 的 GDI 句柄开销
+    if (!m_memDC) m_memDC = CreateCompatibleDC(m_hdc);
+    if (!m_memDC) return false;
+    HBITMAP old = (HBITMAP)SelectObject(m_memDC, m_hbmp);
     RECT rc; GetClientRect(m_hwnd, &rc);
     // 拉伸到窗口（车机分辨率可能 ≠ 手机分辨率）
     StretchBlt(m_hdc, 0, 0, rc.right, rc.bottom,
-               mem, 0, 0, w, h, SRCCOPY);
-    SelectObject(mem, old);
-    DeleteDC(mem);
+               m_memDC, 0, 0, w, h, SRCCOPY);
+    SelectObject(m_memDC, old);
     return true;
 }

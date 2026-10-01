@@ -31,6 +31,7 @@ public:
     void close();
     bool connected() const { return m_sock != INVALID_SOCKET; }
     int  codec() const { return m_codec; }   // 0=H264, 1=MJPEG（由 VIDEO_CONFIG 设置）
+    SOCKET sock() const { return m_sock; }   // 供积压检测（FIONREAD）使用
 
     // ---- 自动发现（UDP 信标，端口 8687）----
     static void StartDiscovery();   // 启动后台监听线程，持续收集手机广播的 IP

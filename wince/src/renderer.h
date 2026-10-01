@@ -15,6 +15,7 @@ public:
 private:
     HWND m_hwnd;
     HDC  m_hdc;
+    HDC  m_memDC;   // 复用内存 DC，避免每帧 CreateCompatibleDC/DeleteDC 开销
     HBITMAP m_hbmp;
     BYTE* m_bits;
     int m_bmpW, m_bmpH;

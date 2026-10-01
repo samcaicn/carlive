@@ -65,6 +65,12 @@ static DWORD WINAPI RecvThread(LPVOID) {
     while (g_running && g_net && g_net->connected()) {
         if (!g_net->recvVideoFrame(f)) break;
         g_linkAlive = true;
+        // 防积压：车机解码跟不上发送节奏时，内核收包缓冲会堆积，延迟将无限累积。
+        // 堆积超过阈值则跳过本帧解码（继续收包排空积压），只解最新的帧。
+        u_long backlog = 0;
+        if (ioctlsocket(g_net->sock(), FIONREAD, &backlog) == 0 && backlog > 96*1024) {
+            continue;
+        }
         std::vector<BYTE> rgb; int w = 0, h = 0;
         if (g_decoder.decode((BYTE)g_net->codec(), f.data.data(), (int)f.data.size(), rgb, w, h)) {
             if (g_renderer) g_renderer->present(rgb.data(), w, h);
@@ -145,12 +151,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSEMOVE:
         if (wp & MK_LBUTTON) {
-            int x = (int)(short)LOWORD(lp);
-            int y = (int)(short)HIWORD(lp);
-            RECT rc; GetClientRect(hwnd, &rc);
-            float nx = (float)x / (rc.right  ? rc.right  : 1);
-            float ny = (float)y / (rc.bottom ? rc.bottom : 1);
-            if (g_net) g_net->sendTouch(0x01, nx, ny); // MOVE
+            // 限流：OS 可能每秒产生上千次 MOVE，全部发送会洪泛网络并加剧抖动；
+            // 限到 ~120Hz 足够顺滑，且最后的落点由 WM_LBUTTONUP 保证送达。
+            static DWORD s_lastMove = 0;
+            DWORD now = GetTickCount();
+            if (now - s_lastMove >= 8) {
+                s_lastMove = now;
+                int x = (int)(short)LOWORD(lp);
+                int y = (int)(short)HIWORD(lp);
+                RECT rc; GetClientRect(hwnd, &rc);
+                float nx = (float)x / (rc.right  ? rc.right  : 1);
+                float ny = (float)y / (rc.bottom ? rc.bottom : 1);
+                if (g_net) g_net->sendTouch(0x01, nx, ny); // MOVE
+            }
         }
         break;
     case WM_LBUTTONUP: {
