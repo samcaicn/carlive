@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- MainActivity 继承 AppCompatActivity，必须套 AppCompat 主题，否则 setContentView 必崩 -->
+    <style name="AppTheme" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowFullscreen">false</item>
+    </style>
+</resources>
