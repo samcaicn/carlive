@@ -38,10 +38,16 @@ class MjpegSender(
         val handler = Handler(thread.looper)
         reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
         val surface = reader!!.surface
-        virtualDisplay = mediaProjection.createVirtualDisplay(
-            "GLOAI", width, height, context.resources.displayMetrics.densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC, surface, null, null
-        )
+        try {
+            virtualDisplay = mediaProjection.createVirtualDisplay(
+                "GLOAI", width, height, context.resources.displayMetrics.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC, surface, null, null
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "createVirtualDisplay failed: $e")
+            running = false
+            return
+        }
         running = true
         handler.post { loop() }
     }

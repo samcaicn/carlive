@@ -10,10 +10,13 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.hardware.usb.UsbManager
+import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.net.ConnectivityManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
@@ -103,7 +106,18 @@ class MirrorForegroundService : Service() {
             if (data != null) {
                 try {
                     val mgr = getSystemService(MediaProjectionManager::class.java)
-                    MirrorState.mediaProjection = mgr.getMediaProjection(rc, data)
+                    val mp = mgr.getMediaProjection(rc, data)
+                    // Android 14(API 34) 硬性要求：createVirtualDisplay 前必须先 registerCallback，
+                    // 否则抛 IllegalStateException 且发生在 ServerSocket 线程里会直接崩进程。
+                    mp.registerCallback(object : MediaProjection.Callback() {
+                        override fun onStop() {
+                            Log.i(TAG, "MediaProjection stopped by system -> release")
+                            MirrorState.mediaProjection = null
+                            stopSender()
+                            updateNotification("GLOAI 车机投屏 · 录屏已停止")
+                        }
+                    }, Handler(Looper.getMainLooper()))
+                    MirrorState.mediaProjection = mp
                     Log.i(TAG, "MediaProjection acquired inside foreground service")
                 } catch (e: Exception) {
                     Log.e(TAG, "getMediaProjection failed: ${e.message}")
@@ -220,6 +234,8 @@ class MirrorForegroundService : Service() {
         beacon?.stop(); beacon = null
         try { usbReceiver?.let { unregisterReceiver(it) } } catch (_: Exception) { }
         usbReceiver = null
+        try { MirrorState.mediaProjection?.stop() } catch (_: Exception) { }
+        MirrorState.mediaProjection = null
     }
 
     override fun onDestroy() {
