@@ -39,6 +39,17 @@ CI 产物（APK + EXE）下载后放到 SD 卡，**零配置、无需手填 IP**
 - 车机显示手机画面 → 触摸车机屏即可操控手机（单指点击/滑动）；
 - **断线自动重连**：车机检测到连接断开即回到自动发现循环，无需重启。
 
+## 诊断日志 gloai.log（启动卡死排查）
+
+`GLOAI.exe` 把启动/连接/线程生命周期写入 **EXE 同目录** 的 `gloai.log`（车机 SD 卡上可直接读，例如 `\SDMEMORY2\GLOAI\wince\gloai.log`）。
+
+- 程序启动即打 `==== GLOAI start (t=0) ====`，随后 `WinMain enter` → `window created` → `renderer+net created` → `discovery started` → `ConnThread start`。
+- 后台连接线程持续 `try connect <ip>:8686`，无网时每 1s 重试，**不阻塞窗口**——这是“启动卡死”修复的核心：主线程只跑 `GetMessage` 消息泵，连接/收帧/心跳全在后台线程。
+- 正常关闭窗口（右上角 X，来自 `WS_SYSMENU`）会依次打 `message pump exited, cleanup` → `ConnThread exit` → `==== GLOAI exit ====`，证明干净退出、无崩溃。
+- 排查“启动卡死”：若日志停在 `window created` 之前，是初始化问题；若停在 `try connect` 循环但窗口可拖动/关闭，说明已正常（只是没搜到手机）。
+
+> 注意：`.gitignore` 已忽略 `*.log`，`gloai.log` 仅在车机运行时生成，不入库。
+
 ## 模块
 
 | 文件 | 职责 |
