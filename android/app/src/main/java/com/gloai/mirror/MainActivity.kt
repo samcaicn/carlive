@@ -16,6 +16,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import android.util.Log
+import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
@@ -35,6 +36,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        installCrashHandler()
+        reportLastCrash()
         setContentView(R.layout.activity_main)
 
         tvStatus = findViewById(R.id.tvStatus)
@@ -160,14 +163,15 @@ class MainActivity : AppCompatActivity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQ_MEDIA && resultCode == RESULT_OK && data != null) {
-            val mgr = getSystemService(MediaProjectionManager::class.java)
-            MirrorState.mediaProjection = mgr.getMediaProjection(resultCode, data)
-            // 启动核心（信标 + 服务端 + USB 检测）
-            startService(Intent(this, MirrorForegroundService::class.java).apply {
+            // 不在此处 getMediaProjection：Android 14 必须先以 mediaProjection 前台服务身份运行才能获取，
+            // 否则 SecurityException 闪退。把 resultCode/data 透传给服务，由服务前台化之后再取。
+            startMirrorService(Intent(this, MirrorForegroundService::class.java).apply {
                 action = MirrorForegroundService.ACTION_START
+                putExtra(MirrorForegroundService.EXTRA_MP_RESULT, resultCode)
+                putExtra(MirrorForegroundService.EXTRA_MP_DATA, data)
             })
             // 若车机已连上，立即起推流
-            startService(Intent(this, MirrorForegroundService::class.java).apply {
+            startMirrorService(Intent(this, MirrorForegroundService::class.java).apply {
                 action = MirrorForegroundService.ACTION_START_SENDER
             })
             refreshStatus()
@@ -178,8 +182,41 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** API 26+ 用 startForegroundService（避免「未调用 startForeground」ANR/崩溃），低版本回退 startService */
+    private fun startMirrorService(intent: Intent) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            @Suppress("DEPRECATION")
+            startService(intent)
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         Log.d("GLOAI", "MainActivity destroyed")
+    }
+
+    /** 全局未捕获异常落盘：下次还崩可直接读到真实堆栈，无需 adb。 */
+    private fun installCrashHandler() {
+        val def = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            try {
+                val f = File(getExternalFilesDir(null), "crash.log")
+                f.writeText("${System.currentTimeMillis()}\n${Log.getStackTraceString(e)}")
+            } catch (_: Exception) { }
+            def?.uncaughtException(t, e)
+        }
+    }
+
+    /** 若上次崩溃留有 crash.log，启动时读出前若干行提示用户（便于反馈）。 */
+    private fun reportLastCrash() {
+        try {
+            val f = File(getExternalFilesDir(null), "crash.log")
+            if (f.exists()) {
+                val lines = f.readLines().take(12).joinToString("\n")
+                Toast.makeText(this, "上次崩溃日志:\n$lines", Toast.LENGTH_LONG).show()
+            }
+        } catch (_: Exception) { }
     }
 }

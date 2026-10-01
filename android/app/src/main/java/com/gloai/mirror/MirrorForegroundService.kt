@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.hardware.usb.UsbManager
+import android.media.projection.MediaProjectionManager
 import android.net.ConnectivityManager
 import android.os.Build
 import android.os.IBinder
@@ -40,9 +41,18 @@ class MirrorForegroundService : Service() {
         const val ACTION_START_SENDER = "com.gloai.mirror.START_SENDER"
         const val ACTION_STOP = "com.gloai.mirror.STOP"
 
+        /** 录屏授权结果透传：Android 14 必须在已是 mediaProjection 前台服务后获取 MediaProjection */
+        const val EXTRA_MP_RESULT = "mp_result"
+        const val EXTRA_MP_DATA = "mp_data"
+
         /** 核心（信标/服务端）是否已启动，供界面显示连接状态 */
         @Volatile var isRunning = false
     }
+
+    // 录屏授权透传（仅 ACTION_START 携带），由服务在前台化之后再取 MediaProjection
+    private var hasProjectionData = false
+    private var pendingResultCode = 0
+    private var pendingData: Intent? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -65,11 +75,38 @@ class MirrorForegroundService : Service() {
         when (intent?.action) {
             ACTION_STOP -> { stopEverything(); stopSelf(); return START_NOT_STICKY }
             ACTION_START_SENDER -> { startSenderIfReady(); return START_STICKY }
+            ACTION_START -> {
+                // 录屏授权结果透传给服务：Android 14 必须先以前台服务(mediaProjection 类型)身份运行，
+                // 再 getMediaProjection，否则抛 SecurityException 闪退。故此处仅存参数，真正获取在 startCore。
+                hasProjectionData = intent.hasExtra(EXTRA_MP_DATA)
+                pendingResultCode = intent.getIntExtra(EXTRA_MP_RESULT, 0)
+                pendingData = getParcelableExtraCompat(intent, EXTRA_MP_DATA)
+                startCore(); return START_STICKY
+            }
             else -> { startCore(); return START_STICKY }
         }
     }
 
+    private fun getParcelableExtraCompat(intent: Intent, key: String): Intent? {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+            intent.getParcelableExtra(key, Intent::class.java)
+        else
+            @Suppress("DEPRECATION") intent.getParcelableExtra(key)
+    }
+
     private fun startCore() {
+        // 在已是 mediaProjection 前台服务的前提下获取 MediaProjection（Android 14 强制要求）。
+        if (hasProjectionData && pendingData != null && MirrorState.mediaProjection == null) {
+            try {
+                val mgr = getSystemService(MediaProjectionManager::class.java)
+                MirrorState.mediaProjection = mgr.getMediaProjection(pendingResultCode, pendingData)
+                Log.i(TAG, "MediaProjection acquired inside foreground service")
+            } catch (e: Exception) {
+                Log.e(TAG, "getMediaProjection failed: ${e.message}")
+            }
+            hasProjectionData = false
+            pendingData = null
+        }
         isRunning = true
         if (beacon == null) {
             beacon = BeaconSender(Protocol.PORT_DEFAULT).also { it.start() }
