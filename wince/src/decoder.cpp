@@ -31,22 +31,25 @@ bool Decoder::decodeMJPEG(const BYTE* data, int len,
     int ncomp = (njGetImageSize() / (iw * ih)); // 1(灰度) / 3(RGB) / 4(RGBA，极少见)
 
     // 渲染器要求 RGB32（4 字节/像素，top-down）：把 24-bit RGB 扩成 RGB32。
+    // ⚠ 关键：32-bit BI_RGB 的 DIB 在内存中的字节布局是【B,G,R,X】（低字节在前是 Blue），
+    // 而 NanoJPEG 输出的是逐像素【R,G,B】。若按原顺序写入，DIB 会把 R 当 Blue 解释，
+    // 画面整体红蓝颠倒（人物皮肤发蓝、蓝天变红）——必须交叉写入。
     rgb.resize((size_t)iw * ih * 4);
     if (ncomp == 3) {
         for (size_t i = 0; (int)i < iw * ih; ++i) {
-            rgb[i*4+0] = src[i*3+0];
-            rgb[i*4+1] = src[i*3+1];
-            rgb[i*4+2] = src[i*3+2];
+            rgb[i*4+0] = src[i*3+2];   // B
+            rgb[i*4+1] = src[i*3+1];   // G
+            rgb[i*4+2] = src[i*3+0];   // R
             rgb[i*4+3] = 0xFF;
         }
-    } else if (ncomp == 4) { // 罕见 4 分量：取前三字节当 RGB，避免被当成灰度误读
+    } else if (ncomp == 4) { // 罕见 4 分量：同样按 BGRX 交叉取前三分量，避免被当成灰度误读
         for (size_t i = 0; (int)i < iw * ih; ++i) {
-            rgb[i*4+0] = src[i*4+0];
+            rgb[i*4+0] = src[i*4+2];
             rgb[i*4+1] = src[i*4+1];
-            rgb[i*4+2] = src[i*4+2];
+            rgb[i*4+2] = src[i*4+0];
             rgb[i*4+3] = 0xFF;
         }
-    } else { // 灰度（极少见）：填成灰阶 RGB32
+    } else { // 灰度（极少见）：三通道同值，通道顺序无关紧要
         for (size_t i = 0; (int)i < iw * ih; ++i) {
             unsigned char v = src[i];
             rgb[i*4+0] = v; rgb[i*4+1] = v; rgb[i*4+2] = v; rgb[i*4+3] = 0xFF;

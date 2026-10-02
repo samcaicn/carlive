@@ -11,6 +11,14 @@ static const BYTE MAGIC[4] = { 0x47, 0x4C, 0x4F, 0x41 }; // "GLOA"
 // 对端协议解析错位。所有发送统一走 sendMsg 并在此加锁串行化。
 static CRITICAL_SECTION g_csSend;
 
+// 连接世代号（详见 net.h ConnEpoch）：Interlocked 递增，供后台线程确定性判断“本连接是否已作废”。
+static volatile LONG g_epoch = 0;
+long NetClient::ConnEpoch() { return g_epoch; }
+
+// 单帧/单消息上限（收发两侧统一 8MB）：超过即视为损坏或异常流，直接跳过，
+// 避免在 64MB 级车机上做一次足以触发 OOM 的巨量分配。
+static const int MAX_FRAME_BYTES = 8 * 1024 * 1024;
+
 #ifndef TCP_NODELAY
 #define TCP_NODELAY 0x1
 #endif
@@ -64,6 +72,7 @@ bool NetClient::connect(const std::wstring& host, int port) {
     if (::connect(m_sock, (SOCKADDR*)&sa, sizeof(sa)) == SOCKET_ERROR) {
         close(); return false;
     }
+    InterlockedIncrement(&g_epoch); // 新连接：作废此前所有后台线程持有的 socket
     return true;
 }
 
@@ -97,7 +106,12 @@ bool NetClient::connectTimeout(const std::wstring& host, int port, int timeoutMs
         ok = (err == 0);
     }
     mode = 0; ioctlsocket(s, FIONBIO, &mode);
-    if (ok) { setRecvTimeout(s); m_sock = s; return true; }
+    if (ok) {
+        setRecvTimeout(s);
+        m_sock = s;
+        InterlockedIncrement(&g_epoch); // 新连接：作废此前所有后台线程持有的 socket
+        return true;
+    }
     closesocket(s);
     return false;
 }
@@ -174,7 +188,8 @@ bool NetClient::readMsg(BYTE& type, std::vector<BYTE>& payload) {
     type = 0; if (!readExact(&type, 1)) return false;
     BYTE lenBuf[4]; if (!readExact(lenBuf, 4)) return false;
     int len = (lenBuf[0]<<24)|(lenBuf[1]<<16)|(lenBuf[2]<<8)|lenBuf[3];
-    if (len < 0 || len > 0x00FFFFFF) return false;
+    // 上限与单帧限制对齐（原为 16MB：在 64MB 级车机上一次 resize 就足以触发 OOM）
+    if (len < 0 || len > MAX_FRAME_BYTES + 9) return false;
     payload.resize(len);
     if (len > 0 && !readExact(payload.data(), len)) return false;
     return true;
@@ -192,7 +207,7 @@ bool NetClient::recvVideoFrame(VideoFrame& out) {
             if (dlen < 0 || (size_t)dlen > payload.size()-9) continue;
             // 防御：单帧超过 8MB 视为异常（损坏/恶意流），直接跳过并继续读下一帧，
             // 避免 64MB 级 WinCE 设备为异常帧分配巨量内存导致 OOM。
-            if (dlen > 8*1024*1024) { Log("recvVideoFrame: 单帧过大 %d 字节，跳过", dlen); continue; }
+            if (dlen > MAX_FRAME_BYTES) { Log("recvVideoFrame: 单帧过大 %d 字节，跳过", dlen); continue; }
             // 反压：若内核收包缓冲仍堆积大量数据，说明本端解码跟不上发送节奏，
             // 直接丢弃本帧继续读下一帧（取最新），避免无意义解码与内存拷贝。
             u_long backlog = 0;
@@ -211,6 +226,10 @@ bool NetClient::recvVideoFrame(VideoFrame& out) {
 
 void NetClient::close() {
     if (m_sock != INVALID_SOCKET) {
+        // 先递增世代号，让仍在 recv/send 的旧线程尽快自检退出：
+        // 同一个 socket 句柄号可能在 closesocket 后被下一次连接立刻复用，
+        // 旧线程继续 recv 会读到新连接的数据流，导致协议错位与解码错帧。
+        InterlockedIncrement(&g_epoch);
         closesocket(m_sock);
         m_sock = INVALID_SOCKET;
     }
@@ -435,16 +454,30 @@ static DWORD WINAPI DiscoveryThread(LPVOID) {
     return 0;
 }
 
+static HANDLE g_hDiscThread = NULL;
+static HANDLE g_hScanThread = NULL;
+
 void NetClient::StartDiscovery() {
     InitializeCriticalSection(&g_csCand);
     if (g_discoveryOn) return;
     g_discoveryOn = true;
-    CreateThread(NULL, 0, DiscoveryThread, NULL, 0, NULL);
-    CreateThread(NULL, 0, SubnetScanThread, NULL, 0, NULL);
+    g_hDiscThread = CreateThread(NULL, 0, DiscoveryThread, NULL, 0, NULL);
+    g_hScanThread = CreateThread(NULL, 0, SubnetScanThread, NULL, 0, NULL);
 }
 
 void NetClient::StopDiscovery() {
     g_discoveryOn = false;
+    // 等待两个探测线程真正退出并回收句柄：此前 CreateThread 返回的句柄从未 CloseHandle，
+    // 长期运行会持续泄漏内核对象；更关键的是退出阶段若线程仍在跑，
+    // 会继续访问已被 delete 的渲染器/网络对象（崩溃）。
+    if (g_hDiscThread) {
+        if (WaitForSingleObject(g_hDiscThread, 8000) == WAIT_TIMEOUT) Log("warn: discovery thread join timeout");
+        CloseHandle(g_hDiscThread); g_hDiscThread = NULL;
+    }
+    if (g_hScanThread) {
+        if (WaitForSingleObject(g_hScanThread, 8000) == WAIT_TIMEOUT) Log("warn: scan thread join timeout");
+        CloseHandle(g_hScanThread); g_hScanThread = NULL;
+    }
 }
 
 void NetClient::SetLinkUp(bool up) {

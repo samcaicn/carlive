@@ -35,7 +35,13 @@ public:
 
     // ---- 自动发现（纯探测，不写死任何地址）----
     static void StartDiscovery();   // 启动后台监听/探测线程，持续发现手机 IP
-    static void StopDiscovery();
+    static void StopDiscovery();    // 停止并等待探测线程真正退出后再返回（避免线程句柄泄漏/退出后仍写日志）
+
+    // 连接世代号：每次成功建立连接 / 关闭连接都会递增。后台线程启动时记录当时的世代号，
+    // 循环中一旦发现世代号变化，说明本线程持有的 socket 已被关闭——而 Winsock 可能立即把同一个
+    // 句柄号分配给下一次连接，若旧线程仍在 recv 就会读到新连接的字节流，造成协议错位。
+    // 相比“等待 N 秒”的时间兜底，这是确定性的判据。
+    static long ConnEpoch();
     // 链路连通状态标记：由连接线程在握手成功/断开时调用，供探测线程在已连上时暂停，避免无意义探测
     static void SetLinkUp(bool up);
     // 清空【已扫描/网关推导】候选（保留 UDP 信标 IP）。连接成功后调用：当前连接已采纳，
@@ -44,8 +50,9 @@ public:
     // 返回候选 IP 列表：config.txt 显式 IP（若有）优先，其次【高可信候选】——
     //   含 UDP 信标发现的真实 IP、本机接口网关推导、主动扫描确认。全部动态，无写死地址。
     static void GetCandidates(const std::string& configIP, std::vector<std::string>& out);
-    // 高可信候选数量（信标/网关/扫描命中）。UI 据此区分“正在连接”还是“正在全网扫描”。
-    static int  PriorityCount();
+    // 注：原先在此声明过一个成员函数 PriorityCount()，但 net.cpp 中实际存在的同名函数是文件内
+    // 静态自由函数、并非本类成员；一旦有人按 NetClient::PriorityCount() 调用将直接链接失败。
+    // 候选计数目前仅扫描线程内部使用，故移除这个会误导人的悬空声明。
 
 private:
     SOCKET m_sock;

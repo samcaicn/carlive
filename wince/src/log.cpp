@@ -2,6 +2,7 @@
 // 把启动/连接里程碑与错误写入 EXE 同目录 gloai.log，便于在车机 SD 卡上排查“启动卡死”等问题。
 #include "log.h"
 #include <stdarg.h>
+#include <string.h>
 
 #ifdef __MINGW32__
 #define SNPRINTF  _snprintf
@@ -14,6 +15,10 @@
 static HANDLE   g_hLog = INVALID_HANDLE_VALUE;
 static DWORD    g_startTick = 0;
 static CRITICAL_SECTION g_csLog;
+// 日志节流：完全相同内容的相邻日志 5s 内只落盘一次（见 Log 内注释）
+static char     g_lastMsg[384] = "";
+static DWORD    g_lastSameTick = 0;
+static DWORD    g_lastFlush = 0;
 
 void LogInit() {
     g_startTick = GetTickCount();
@@ -54,6 +59,18 @@ void Log(const char* fmt, ...) {
     if ((size_t)n > sizeof(msg) - 1) n = (int)(sizeof(msg) - 1);
     msg[n] = 0;
 
+    // 节流：内容完全相同的日志，5s 内只写一次。
+    // 重连循环每轮会对多个候选各打一条 try/FAIL，手机没开 App 时每秒数条雷同日志持续写 SD 卡，
+    // 既抢占单核 CPU 又加速闪存磨损；真正的状态变化（新 IP、连上、断开）不受影响。
+    DWORD now = GetTickCount();
+    if (strcmp(msg, g_lastMsg) == 0) {
+        if (now - g_lastSameTick < 5000) { LeaveCriticalSection(&g_csLog); return; }
+    } else {
+        strncpy(g_lastMsg, msg, sizeof(g_lastMsg) - 1);
+        g_lastMsg[sizeof(g_lastMsg) - 1] = 0;
+    }
+    g_lastSameTick = now;
+
     char line[448];
     DWORD t = GetTickCount() - g_startTick;
     int m = SNPRINTF(line, sizeof(line), "[t+%u] %s\r\n", t, msg);
@@ -62,7 +79,9 @@ void Log(const char* fmt, ...) {
 
     DWORD wr = 0;
     WriteFile(g_hLog, line, (DWORD)m, &wr, NULL);
-    FlushFileBuffers(g_hLog);
+    // 不再每条都 FlushFileBuffers：它会强制同步落盘，在单核车机上开销显著，
+    // 高频日志会直接拖慢收帧线程；改为最久 2s 刷一次，兼顾断电丢日志的风险。
+    if (now - g_lastFlush > 2000) { FlushFileBuffers(g_hLog); g_lastFlush = now; }
 
     LeaveCriticalSection(&g_csLog);
 }
