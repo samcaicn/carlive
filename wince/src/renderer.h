@@ -18,6 +18,8 @@ public:
     void contentRect(int& x, int& y, int& w, int& h) const {
         x = m_cx; y = m_cy; w = m_cw; h = m_ch;
     }
+    // 断开/重连时清空内容区，使触摸归一化退回全客户区，避免用上一台手机的宽高比映射坐标
+    void resetContentRect() { m_cx = 0; m_cy = 0; m_cw = 0; m_ch = 0; }
 
 private:
     HWND m_hwnd;

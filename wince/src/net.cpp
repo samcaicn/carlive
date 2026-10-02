@@ -190,6 +190,9 @@ bool NetClient::recvVideoFrame(VideoFrame& out) {
             out.timestamp = (payload[1]<<24)|(payload[2]<<16)|(payload[3]<<8)|payload[4];
             int dlen = (payload[5]<<24)|(payload[6]<<16)|(payload[7]<<8)|payload[8];
             if (dlen < 0 || (size_t)dlen > payload.size()-9) continue;
+            // 防御：单帧超过 8MB 视为异常（损坏/恶意流），直接跳过并继续读下一帧，
+            // 避免 64MB 级 WinCE 设备为异常帧分配巨量内存导致 OOM。
+            if (dlen > 8*1024*1024) { Log("recvVideoFrame: 单帧过大 %d 字节，跳过", dlen); continue; }
             // 反压：若内核收包缓冲仍堆积大量数据，说明本端解码跟不上发送节奏，
             // 直接丢弃本帧继续读下一帧（取最新），避免无意义解码与内存拷贝。
             u_long backlog = 0;

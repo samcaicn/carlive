@@ -19,13 +19,16 @@ bool Decoder::decode(BYTE codec, const BYTE* data, int len,
 
 bool Decoder::decodeMJPEG(const BYTE* data, int len,
                           std::vector<BYTE>& rgb, int& w, int& h) {
+    if (!data || len <= 0) return false;
     njInit();
     if (njDecode(data, len) != NJ_OK) { njDone(); return false; }
 
     int iw = njGetWidth();
     int ih = njGetHeight();
+    if (iw <= 0 || ih <= 0) { njDone(); return false; }  // 防御：解码成功但产出 0 尺寸（损坏流）
     const unsigned char* src = njGetImage();
-    int ncomp = (iw > 0 && ih > 0) ? (njGetImageSize() / (iw * ih)) : 0;
+    if (!src) { njDone(); return false; }
+    int ncomp = (njGetImageSize() / (iw * ih)); // 1(灰度) / 3(RGB) / 4(RGBA，极少见)
 
     // 渲染器要求 RGB32（4 字节/像素，top-down）：把 24-bit RGB 扩成 RGB32。
     rgb.resize((size_t)iw * ih * 4);
@@ -34,6 +37,13 @@ bool Decoder::decodeMJPEG(const BYTE* data, int len,
             rgb[i*4+0] = src[i*3+0];
             rgb[i*4+1] = src[i*3+1];
             rgb[i*4+2] = src[i*3+2];
+            rgb[i*4+3] = 0xFF;
+        }
+    } else if (ncomp == 4) { // 罕见 4 分量：取前三字节当 RGB，避免被当成灰度误读
+        for (size_t i = 0; (int)i < iw * ih; ++i) {
+            rgb[i*4+0] = src[i*4+0];
+            rgb[i*4+1] = src[i*4+1];
+            rgb[i*4+2] = src[i*4+2];
             rgb[i*4+3] = 0xFF;
         }
     } else { // 灰度（极少见）：填成灰阶 RGB32

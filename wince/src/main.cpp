@@ -33,10 +33,15 @@ static std::wstring A2W(const char* s) {
 }
 
 static wchar_t g_statusText[128] = L"GLOAI 车机投屏 · 等待手机";
+static CRITICAL_SECTION g_csStatus;   // 保护 g_statusText：连接线程写、GUI 线程读，避免读到撕裂文本
 static volatile bool g_hasFrame = false;
-static void SetStatus(const wchar_t* s) {
+// resetFrame=true（默认）：非镜像态(连接中/断开/扫描)应清帧改显示文字；
+// resetFrame=false：进入稳定镜像态时保留当前帧，避免把刚出的画面闪成状态文字。
+static void SetStatus(const wchar_t* s, bool resetFrame = true) {
+    EnterCriticalSection(&g_csStatus);
     wcsncpy(g_statusText, s, 127); g_statusText[127] = 0;
-    g_hasFrame = false; // 状态切换（含重连）时重置，重新显示文字
+    LeaveCriticalSection(&g_csStatus);
+    if (resetFrame) g_hasFrame = false;
     if (g_hwnd) { SetWindowText(g_hwnd, s); InvalidateRect(g_hwnd, NULL, FALSE); }
 }
 
@@ -98,6 +103,7 @@ static std::string readConfig() {
 // 接收线程：拉视频帧 → 解码 → 渲染
 static DWORD WINAPI RecvThread(LPVOID) {
     VideoFrame f;
+    std::vector<BYTE> rgb; // 复用：避免每帧重新分配 8MB 级缓冲，降低低内存 WinCE 上的堆碎片与卡顿
     while (g_running && g_net && g_net->connected()) {
         if (!g_net->recvVideoFrame(f)) {
             // 对端关闭/协议错位：立即标记断链，触发 ConnThread 秒级重连，
@@ -106,7 +112,7 @@ static DWORD WINAPI RecvThread(LPVOID) {
             break;
         }
         g_linkAlive = true; // 收到数据，链路活跃
-        std::vector<BYTE> rgb; int w = 0, h = 0;
+        int w = 0, h = 0;
         if (g_decoder.decode((BYTE)g_net->codec(), f.data.data(), (int)f.data.size(), rgb, w, h)) {
             if (g_renderer) g_renderer->present(rgb.data(), w, h);
             if (!g_hasFrame) { g_hasFrame = true; InvalidateRect(g_hwnd, NULL, FALSE); }
@@ -179,7 +185,7 @@ static DWORD WINAPI ConnThread(LPVOID) {
         while (g_running && g_net->connected() && g_linkAlive) {
             if (!shownMirroring) {
                 if (g_hasFrame) {
-                    SetStatus(TEXT("GLOAI 车机投屏 · 已连接，镜像中"));
+                    SetStatus(TEXT("GLOAI 车机投屏 · 已连接，镜像中"), false); // 稳定镜像态：保留画面，不闪文字
                     shownMirroring = true;
                 } else if (GetTickCount() - t0 > 10000) {
                     // 措辞中性：手机从点启动到真正出帧（授权弹窗+MediaProjection 初始化）可能 >6s，
@@ -196,8 +202,11 @@ static DWORD WINAPI ConnThread(LPVOID) {
         g_net->sendControl(0x04);
         g_net->close();
         NetClient::SetLinkUp(false);  // 通知探测线程：已断开，恢复主动扫描
-        if (hRecv) { WaitForSingleObject(hRecv, 2000); CloseHandle(hRecv); }
-        if (hHb)   { WaitForSingleObject(hHb,   2000); CloseHandle(hHb); }
+        // 等待两条后台线程真正退出再重连：close() 已让 recv 立即返回，线程会很快退出；
+        // 以 4s 为上限兜底，避免极端情况下新旧 recv 线程并发读同一 socket 造成协议错位/双重解码。
+        if (hRecv) { WaitForSingleObject(hRecv, 4000); CloseHandle(hRecv); hRecv = NULL; }
+        if (hHb)   { WaitForSingleObject(hHb,   4000); CloseHandle(hHb);   hHb = NULL; }
+        if (g_renderer) g_renderer->resetContentRect(); // 断开后清空内容区，避免重连间隙用上一台手机的宽高比映射触摸
         SetStatus(TEXT("GLOAI 车机投屏 · 连接断开，重新发现…"));
         Sleep(500);
     }
@@ -214,15 +223,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         } else {
             RECT rc; GetClientRect(hwnd, &rc);
             FillRect(hdc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+            wchar_t txt[128];
+            EnterCriticalSection(&g_csStatus);
+            wcsncpy(txt, g_statusText, 127); txt[127] = 0;
+            LeaveCriticalSection(&g_csStatus);
             SetTextColor(hdc, RGB(0, 200, 255));
             SetBkMode(hdc, TRANSPARENT);
             // 支持多行状态文本（含 \r\n 的排障提示）：DT_SINGLELINE 会忽略 \r\n，
             // 故先以 DT_CALCRECT 量出文本高度，再整体垂直居中绘制。
             RECT tr = rc;
-            DrawText(hdc, g_statusText, -1, &tr, DT_CENTER | DT_WORDBREAK | DT_CALCRECT);
+            DrawText(hdc, txt, -1, &tr, DT_CENTER | DT_WORDBREAK | DT_CALCRECT);
             int th = tr.bottom - tr.top;
             RECT dr = rc; dr.top += (rc.bottom - th) / 2;
-            DrawText(hdc, g_statusText, -1, &dr, DT_CENTER | DT_WORDBREAK);
+            DrawText(hdc, txt, -1, &dr, DT_CENTER | DT_WORDBREAK);
         }
         EndPaint(hwnd, &ps);
         return 0;
@@ -271,6 +284,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
     LogInit();
+    InitializeCriticalSection(&g_csStatus);
     Log("WinMain enter");
 
     WNDCLASS wc = {0};
@@ -307,6 +321,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
     NetClient::StopDiscovery();
     if (g_net) { g_net->close(); delete g_net; }
     if (g_renderer) delete g_renderer;
+    DeleteCriticalSection(&g_csStatus);
     Log("==== GLOAI exit ====");
     return 0;
 }
