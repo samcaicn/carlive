@@ -7,6 +7,10 @@
 
 static const BYTE MAGIC[4] = { 0x47, 0x4C, 0x4F, 0x41 }; // "GLOA"
 
+// 发送互斥：主线程(触摸)与心跳线程会并发 send 同一 socket，无锁会导致两条消息字节交错、
+// 对端协议解析错位。所有发送统一走 sendMsg 并在此加锁串行化。
+static CRITICAL_SECTION g_csSend;
+
 #ifndef TCP_NODELAY
 #define TCP_NODELAY 0x1
 #endif
@@ -18,12 +22,21 @@ static void setNoDelay(SOCKET s) {
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
 }
 
+// TCP 保活：对端异常掉线（无 RST）时让协议栈主动探活，配合心跳更快发现死链。
+// WinCE 保活间隔由注册表决定，默认较长，这里仅开启开关；真正的断线判定仍由心跳线程负责。
+static void setKeepAlive(SOCKET s) {
+    if (s == INVALID_SOCKET) return;
+    int one = 1;
+    setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, (const char*)&one, sizeof(one));
+}
+
 NetClient::NetClient() : m_sock(INVALID_SOCKET), m_codec(1) {
     WSADATA wsa = {0};
     WSAStartup(MAKEWORD(2,2), &wsa);
+    InitializeCriticalSection(&g_csSend);
 }
 
-NetClient::~NetClient() { close(); WSACleanup(); }
+NetClient::~NetClient() { close(); DeleteCriticalSection(&g_csSend); WSACleanup(); }
 
 bool NetClient::connect(const std::wstring& host, int port) {
     // WinCE 无 getaddrinfo 的宽字符友好版，这里用 inet_addr 直连 IPv4
@@ -38,6 +51,7 @@ bool NetClient::connect(const std::wstring& host, int port) {
     m_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (m_sock == INVALID_SOCKET) return false;
     setNoDelay(m_sock);
+    setKeepAlive(m_sock);
     if (::connect(m_sock, (SOCKADDR*)&sa, sizeof(sa)) == SOCKET_ERROR) {
         close(); return false;
     }
@@ -56,6 +70,7 @@ bool NetClient::connectTimeout(const std::wstring& host, int port, int timeoutMs
     SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET) return false;
     setNoDelay(s);
+    setKeepAlive(s);
 
     // 非阻塞 connect + select 超时
     u_long mode = 1;
@@ -89,8 +104,21 @@ bool NetClient::sendMsg(BYTE type, const BYTE* payload, int len) {
     msg.push_back((BYTE)(len >> 8));
     msg.push_back((BYTE)(len & 0xFF));
     if (payload && len > 0) msg.insert(msg.end(), payload, payload+len);
-    int sent = ::send(m_sock, (const char*)msg.data(), (int)msg.size(), 0);
-    return sent == (int)msg.size();
+    // 串行化发送（触摸/心跳来自不同线程），并循环发送直到整条消息发完——
+    // MJPEG 单帧可达数百 KB，一次 send 在阻塞 socket 上可能只发一部分，必须续发，否则对端收到截断帧。
+    EnterCriticalSection(&g_csSend);
+    const char* p = (const char*)msg.data();
+    int total = (int)msg.size();
+    int off = 0;
+    bool ok = true;
+    while (off < total) {
+        int sent = ::send(m_sock, p + off, total - off, 0);
+        if (sent <= 0) { ok = false; break; }
+        off += sent;
+    }
+    LeaveCriticalSection(&g_csSend);
+    if (!ok) { close(); return false; }
+    return true;
 }
 
 void NetClient::sendHandshakeHeadunit(int maxW, int maxH) {
@@ -183,9 +211,13 @@ static const int DISCOVERY_PORT = 8687;
 static const int PHONE_PORT    = 8686;
 
 static CRITICAL_SECTION g_csCand;
-static std::vector<std::string> g_priIPs;      // 高可信候选：UDP 信标真实IP + 接口网关推导 + 扫描确认
+static std::vector<std::string> g_priIPs;      // 接口网关推导 + 扫描确认（均经 8686 探测命中）
+static std::string g_beaconIP;                 // 最高优先级：UDP 信标带来的手机真实 IP
 static volatile bool g_discoveryOn = false;
 static volatile bool g_linkUp      = false;    // 链路已连通（握手成功）→ 暂停扫描
+
+// 前向声明：AddInterfaceGateways 在定义前需要它（其定义在文件靠后）
+static bool probePort(unsigned a, unsigned b, unsigned c, unsigned d, int timeoutMs);
 
 static bool HasIP(const std::vector<std::string>& v, const char* ip) {
     for (size_t i = 0; i < v.size(); i++) if (v[i] == ip) return true;
@@ -214,6 +246,8 @@ static bool isLocalSubnet(unsigned a, unsigned b, unsigned c, unsigned d) {
 }
 
 // 探测手段 2：枚举本机接口，动态推导手机（网关/服务端）地址，绝不写死段号。
+// 关键修正：网关/.1 必须【先探测 8686 通了才加为候选】——否则车机自身的 WiFi 路由器网关
+// （如 192.168.43.1）会被当成手机反复连、每轮白等 1.5s。路由器没有 8686，探测必失败，自然被排除。
 static void AddInterfaceGateways() {
     ULONG buflen = 0;
     if (GetAdaptersInfo(NULL, &buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0)
@@ -222,11 +256,13 @@ static void AddInterfaceGateways() {
     PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)buf.data();
     if (GetAdaptersInfo(pAdapters, &buflen) != NO_ERROR) return;
     for (PIP_ADAPTER_INFO p = pAdapters; p; p = p->Next) {
-        // 优先使用网卡自身上报的真实网关（USB 共享下即手机地址）
+        // 优先使用网卡自身上报的真实网关（USB 共享下即手机地址）；探测通才加
         unsigned ga, gb, gc, gd;
-        if (sscanf(p->GatewayList.IpAddress.String, "%u.%u.%u.%u", &ga, &gb, &gc, &gd) == 4
-            && (ga | gb | gc | gd) != 0) {
+        bool hasGw = (sscanf(p->GatewayList.IpAddress.String, "%u.%u.%u.%u", &ga, &gb, &gc, &gd) == 4
+                      && (ga | gb | gc | gd) != 0);
+        if (hasGw && probePort(ga, gb, gc, gd, 200)) {
             AddPriority(p->GatewayList.IpAddress.String);
+            Log("disc: 网关命中 %s:%d", p->GatewayList.IpAddress.String, PHONE_PORT);
         }
         for (PIP_ADDR_STRING addr = &p->IpAddressList; addr; addr = addr->Next) {
             unsigned a, b, c, d;
@@ -234,11 +270,14 @@ static void AddInterfaceGateways() {
                 continue;
             if (a == 0 || a == 127 || d == 0 || d == 255)
                 continue; // 跳过 0.0.0.0 / 回环 / 网络号 / 广播
-            // 网卡未上报网关时，推断本子网 .1 为网关（车机自身 w>1，手机一般为 .1）
-            if ((ga | gb | gc | gd) == 0 && d != 1) {
+            // 网卡未上报网关时，推断本子网 .1 为网关（车机自身 w>1，手机一般为 .1）；同样探测通才加
+            if (!hasGw && d != 1) {
                 char gw[32];
                 snprintf(gw, sizeof(gw), "%u.%u.%u.1", a, b, c);
-                AddPriority(gw);
+                if (probePort(a, b, c, 1, 200)) {
+                    AddPriority(gw);
+                    Log("disc: .1 命中 %s:%d", gw, PHONE_PORT);
+                }
             }
         }
     }
@@ -367,7 +406,7 @@ static DWORD WINAPI DiscoveryThread(LPVOID) {
                 if (strncmp(buf, "GLOAI|", 6) == 0) {
                     char* ip = buf + 6;
                     char* sep = strchr(ip, '|');
-                    if (sep) { *sep = 0; AddPriority(ip); }
+                    if (sep) { *sep = 0; AddPriority(ip); EnterCriticalSection(&g_csCand); g_beaconIP = ip; LeaveCriticalSection(&g_csCand); }
                 }
             }
         }
@@ -394,8 +433,15 @@ void NetClient::SetLinkUp(bool up) {
 
 void NetClient::GetCandidates(const std::string& configIP, std::vector<std::string>& out) {
     out.clear();
-    if (!configIP.empty()) out.push_back(configIP); // 显式覆盖优先
+    // 优先级：config.txt 显式覆盖 > UDP 信标真实IP(最高可信) > 接口网关/扫描确认
+    std::vector<std::string> tmp;
+    if (!configIP.empty()) tmp.push_back(configIP);
     EnterCriticalSection(&g_csCand);
-    for (size_t i = 0; i < g_priIPs.size(); i++) out.push_back(g_priIPs[i]);
+    if (!g_beaconIP.empty()) tmp.push_back(g_beaconIP);
+    for (size_t i = 0; i < g_priIPs.size(); i++) tmp.push_back(g_priIPs[i]);
     LeaveCriticalSection(&g_csCand);
+    // 保序去重：信标 IP 常与网关推导重复，避免重复尝试同一个地址
+    for (size_t i = 0; i < tmp.size(); i++) {
+        if (!HasIP(out, tmp[i].c_str())) out.push_back(tmp[i]);
+    }
 }

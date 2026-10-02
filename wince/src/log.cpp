@@ -22,6 +22,17 @@ void LogInit() {
     if (GetModuleFileName(NULL, path, MAX_PATH)) {
         WCHAR* p = wcsrchr(path, L'\\');
         if (p) wcscpy(p + 1, L"gloai.log");
+        // 日志滚动：SD 卡空间有限，超过 256KB 时把旧日志改名为 gloai.log.bak（仅保留一份备份），避免无限增长。
+        HANDLE hSize = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        if (hSize != INVALID_HANDLE_VALUE) {
+            DWORD sz = GetFileSize(hSize, NULL);
+            CloseHandle(hSize);
+            if (sz != INVALID_FILE_SIZE && sz > 256 * 1024) {
+                WCHAR bak[MAX_PATH]; wcscpy(bak, path); wcscat(bak, L".bak");
+                DeleteFile(bak);
+                MoveFile(path, bak);
+            }
+        }
         g_hLog = CreateFile(path, GENERIC_WRITE, FILE_SHARE_READ, NULL,
                             OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (g_hLog != INVALID_HANDLE_VALUE) {

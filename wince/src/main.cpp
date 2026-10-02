@@ -124,7 +124,7 @@ static DWORD WINAPI ConnThread(LPVOID) {
             NetClient::GetCandidates(cfg, cands);
             if (cands.empty()) {
                 // 还没有任何候选：后台轻量扫描在跑，提示“正在扫描”但不要卡住 UI/系统
-                SetStatus(TEXT("GLOAI 车机投屏 · 未发现手机，正在扫描网络…"));
+                SetStatus(TEXT("GLOAI 车机投屏 · 未发现手机，正在扫描网络…\r\n请在手机打开 GLOAI App 并点「启动投屏服务」+允许录屏"));
                 Sleep(1000);
                 continue;
             }
