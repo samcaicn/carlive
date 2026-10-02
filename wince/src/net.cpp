@@ -2,6 +2,7 @@
 #include "net.h"
 #include "log.h"
 #include <ws2tcpip.h>
+#include <iphlpapi.h>
 #include <cstring>
 
 static const BYTE MAGIC[4] = { 0x47, 0x4C, 0x4F, 0x41 }; // "GLOA"
@@ -190,6 +191,36 @@ static void AddCandidate(const char* ip) {
     LeaveCriticalSection(&g_csCand);
 }
 
+// USB 网络共享（Android USB tether）下，手机是网关/服务端，自身地址为子网 .1，
+// 给本端(车机)分配 .y(y>1)。本函数：① 加入常见固定网关兜底；② 枚举本机接口，
+// 若本端位于 192.168.x.y(y>1) 子网，则手机必在 192.168.x.1，自动加入候选。
+static void AddUsbTetherGateways() {
+    static const char* fallback[] = {
+        "192.168.42.1", "192.168.43.1", "192.168.44.1",
+        "192.168.45.1", "192.168.46.1", NULL
+    };
+    for (int i = 0; fallback[i]; i++) AddCandidate(fallback[i]);
+
+    ULONG buflen = 0;
+    if (GetAdaptersInfo(NULL, &buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0)
+        return;
+    std::vector<BYTE> buf(buflen);
+    PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)buf.data();
+    if (GetAdaptersInfo(pAdapters, &buflen) != NO_ERROR) return;
+    for (PIP_ADAPTER_INFO p = pAdapters; p; p = p->Next) {
+        for (PIP_ADDR_STRING addr = &p->IpAddressList; addr; addr = addr->Next) {
+            unsigned a, b, c, d;
+            if (sscanf(addr->IpAddress.String, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+                if (a == 192 && b == 168 && d != 0 && d != 1) {
+                    char gw[32];
+                    snprintf(gw, sizeof(gw), "%u.%u.%u.1", a, b, c);
+                    AddCandidate(gw);
+                }
+            }
+        }
+    }
+}
+
 static DWORD WINAPI DiscoveryThread(LPVOID) {
     SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s == INVALID_SOCKET) return 0;
@@ -203,9 +234,8 @@ static DWORD WINAPI DiscoveryThread(LPVOID) {
         closesocket(s);
         return 0;
     }
-    // USB 网络共享时手机侧固定 IP（Android 常见取值），无需信标即可直连
-    AddCandidate("192.168.42.129");
-    AddCandidate("192.168.43.1");
+    // USB 网络共享：加入手机(网关/服务端)候选地址（见 AddUsbTetherGateways）
+    AddUsbTetherGateways();
 
     fd_set rfds;
     timeval tv;

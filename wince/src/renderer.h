@@ -9,6 +9,8 @@ public:
     ~Renderer();
     // 输入 RGB32 (top-down, 行宽=w*4)，拉伸呈现到窗口
     bool present(const BYTE* rgb, int w, int h);
+    // 把最近一帧从内部内存 DC 复制到给定 HDC（WM_PAINT 时持久重绘，避免窗口重绘后画面丢失）
+    void blit(HDC dst);
     int width() const { return m_winW; }
     int height() const { return m_winH; }
 

@@ -31,8 +31,12 @@ static std::wstring A2W(const char* s) {
     return w;
 }
 
+static wchar_t g_statusText[128] = L"GLOAI 车机投屏 · 等待手机";
+static volatile bool g_hasFrame = false;
 static void SetStatus(const wchar_t* s) {
-    if (g_hwnd) SetWindowText(g_hwnd, s);
+    wcsncpy(g_statusText, s, 127); g_statusText[127] = 0;
+    g_hasFrame = false; // 状态切换（含重连）时重置，重新显示文字
+    if (g_hwnd) { SetWindowText(g_hwnd, s); InvalidateRect(g_hwnd, NULL, FALSE); }
 }
 
 // 读取同目录 config.txt 的显式 IP（可选覆盖）。格式：「host」「host port」「host:port」。
@@ -74,6 +78,7 @@ static DWORD WINAPI RecvThread(LPVOID) {
         std::vector<BYTE> rgb; int w = 0, h = 0;
         if (g_decoder.decode((BYTE)g_net->codec(), f.data.data(), (int)f.data.size(), rgb, w, h)) {
             if (g_renderer) g_renderer->present(rgb.data(), w, h);
+            if (!g_hasFrame) { g_hasFrame = true; InvalidateRect(g_hwnd, NULL, FALSE); }
         }
     }
     Log("RecvThread exit (connected=%d)", g_net ? (int)g_net->connected() : -1);
@@ -140,6 +145,20 @@ static DWORD WINAPI ConnThread(LPVOID) {
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps; HDC hdc = BeginPaint(hwnd, &ps);
+        if (g_hasFrame && g_renderer) {
+            g_renderer->blit(hdc);
+        } else {
+            RECT rc; GetClientRect(hwnd, &rc);
+            FillRect(hdc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+            SetTextColor(hdc, RGB(0, 200, 255));
+            SetBkMode(hdc, TRANSPARENT);
+            DrawText(hdc, g_statusText, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
     case WM_LBUTTONDOWN: {
         int x = (int)(short)LOWORD(lp);
         int y = (int)(short)HIWORD(lp);

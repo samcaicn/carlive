@@ -23,7 +23,7 @@ echo ">> building $OUT"
   "$SCRIPT_DIR/src/decoder.cpp" \
   "$SCRIPT_DIR/src/log.cpp" \
   -o "$OUT" \
-  -lws2 \
+  -lws2 -liphlpapi \
   -static-libgcc -static-libstdc++
 # 注意：arm-mingw32ce 工具链默认子系统即 Windows CE（PE Subsystem=9, WINDOWS_CE_GUI），
 # 且默认入口为 WinMain（见 cegcc 文档）。显式写 --subsystem,windowsce 反而被 ld 拒绝，

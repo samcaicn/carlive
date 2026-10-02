@@ -47,3 +47,11 @@ bool Renderer::present(const BYTE* rgb, int w, int h) {
     SelectObject(m_memDC, old);
     return true;
 }
+
+void Renderer::blit(HDC dst) {
+    if (!m_memDC || !m_hbmp || m_bmpW == 0) return;
+    HBITMAP old = (HBITMAP)SelectObject(m_memDC, m_hbmp);
+    RECT rc; GetClientRect(m_hwnd, &rc);
+    StretchBlt(dst, 0, 0, rc.right, rc.bottom, m_memDC, 0, 0, m_bmpW, m_bmpH, SRCCOPY);
+    SelectObject(m_memDC, old);
+}
