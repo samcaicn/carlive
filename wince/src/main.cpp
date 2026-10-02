@@ -40,8 +40,8 @@ static void SetStatus(const wchar_t* s) {
     if (g_hwnd) { SetWindowText(g_hwnd, s); InvalidateRect(g_hwnd, NULL, FALSE); }
 }
 
-// 读取同目录 config.txt 的显式 IP（可选覆盖）。格式：「host」「host port」「host:port」。
-// 留空文件或不创建则纯自动发现。
+// 读取同目录 config.txt 的显式 IP（可选覆盖）。支持：注释行(#开头)、空行、
+// 「host」「host port」「host:port」「host=...」。无有效配置则返回空（纯自动发现）。
 static std::string readConfig() {
     std::string ip;
     WCHAR path[MAX_PATH] = {0};
@@ -50,15 +50,26 @@ static std::string readConfig() {
         if (p) wcscpy(p + 1, L"config.txt");
         HANDLE hf = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
         if (hf != INVALID_HANDLE_VALUE) {
-            char buf[128] = {0}; DWORD rd = 0;
-            if (ReadFile(hf, buf, sizeof(buf)-1, &rd, NULL) && rd > 0) {
-                buf[rd] = 0;
-                char h[64]; int pnum = 0;
-                if (sscanf(buf, "%63s %d", h, &pnum) == 2) ip = h;
-                else if (sscanf(buf, "%63[^:]:%d", h, &pnum) == 2) ip = h;
-                else if (sscanf(buf, "%63s", h) == 1) ip = h;
+            char buf[512] = {0}; DWORD rd = 0;
+            std::string content;
+            while (ReadFile(hf, buf, sizeof(buf) - 1, &rd, NULL) && rd > 0) {
+                buf[rd] = 0; content += buf;
             }
             CloseHandle(hf);
+            size_t pos = 0;
+            while (pos < content.size()) {
+                size_t nl = content.find('\n', pos);
+                std::string line = content.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+                pos = (nl == std::string::npos) ? content.size() : nl + 1;
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                size_t s = line.find_first_not_of(" \t");
+                if (s == std::string::npos) continue;   // 空行
+                if (line[s] == '#') continue;           // 注释行
+                std::string body = line.substr(s);
+                char h[64]; int pnum = 0;
+                if (sscanf(body.c_str(), "host=%63s", h) == 1) { ip = h; break; }
+                if (sscanf(body.c_str(), "%63[^: ]%*[: ]%d", h, &pnum) >= 1) { ip = h; break; }
+            }
         }
     }
     return ip;
@@ -118,10 +129,14 @@ static DWORD WINAPI ConnThread(LPVOID) {
                 continue;
             }
             // 有高可信候选（信标/网关/.1）：快速逐个连接，几乎秒连，不依赖全段扫描
-            SetStatus(TEXT("GLOAI 车机投屏 · 正在连接手机…"));
             for (size_t i = 0; i < cands.size() && !ok; i++) {
+                std::wstring w = L"GLOAI 车机投屏 · 正在连接 ";
+                w += A2W(cands[i].c_str());
+                w += L":8686…";
+                SetStatus(w.c_str());
                 Log("try connect %s:8686", cands[i].c_str());
                 if (g_net->connectTimeout(A2W(cands[i].c_str()), 8686, 1500)) ok = true;
+                else Log("connect FAIL %s:8686 (手机端未监听/未启动App?)", cands[i].c_str());
             }
             if (!ok) Sleep(500); // 本轮候选均未响应，稍后（扫描线程可能已补充新候选）再试
         }
