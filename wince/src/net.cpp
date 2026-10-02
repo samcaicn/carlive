@@ -169,16 +169,23 @@ void NetClient::close() {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// 自动发现（UDP 信标，端口 8687）
-// 手机侧每隔 1s 向各 IPv4 接口的广播地址发送 "GLOAI|<ip>|<port>"。
-// 车机侧在此监听，收集手机 IP；同时内置 USB 网络共享的固定 IP 作为回退。
+// 自动发现（纯探测，不写死任何地址）
+// 三级探测，全部动态：
+//   1) UDP 信标（端口 8687）：手机侧每隔 1s 向广播地址发送 "GLOAI|<ip>|<port>"，
+//      车机监听即可拿到手机【真实】IP——最可靠，无需任何假设。
+//   2) 本机接口网关推导：枚举车机自身网卡，若本端位于某私有子网 x.y.z.w(w>1)，
+//      则手机（网关/服务端）必在该子网，优先取网卡真实网关，否则推断为 x.y.z.1。
+//   3) 主动子网扫描：对车机所在每个私有子网逐地址 TCP 探测 8686 端口，开放者即手机。
+//      ——真正的“探测”，不依赖手机恰好是 .1 的假设，应对任何 tether 拓扑。
 ///////////////////////////////////////////////////////////////////////////////
 
 static const int DISCOVERY_PORT = 8687;
+static const int PHONE_PORT    = 8686;
 
 static CRITICAL_SECTION g_csCand;
-static std::vector<std::string> g_beaconIPs;   // 信标发现的手机 IP
+static std::vector<std::string> g_beaconIPs;   // 信标/扫描发现的手机 IP
 static volatile bool g_discoveryOn = false;
+static volatile bool g_linkUp      = false;    // 链路已连通（握手成功）→ 暂停探测
 
 static void AddCandidate(const char* ip) {
     if (!ip || !*ip) return;
@@ -191,16 +198,17 @@ static void AddCandidate(const char* ip) {
     LeaveCriticalSection(&g_csCand);
 }
 
-// USB 网络共享（Android USB tether）下，手机是网关/服务端，自身地址为子网 .1，
-// 给本端(车机)分配 .y(y>1)。本函数：① 加入常见固定网关兜底；② 枚举本机接口，
-// 若本端位于 192.168.x.y(y>1) 子网，则手机必在 192.168.x.1，自动加入候选。
-static void AddUsbTetherGateways() {
-    static const char* fallback[] = {
-        "192.168.42.1", "192.168.43.1", "192.168.44.1",
-        "192.168.45.1", "192.168.46.1", NULL
-    };
-    for (int i = 0; fallback[i]; i++) AddCandidate(fallback[i]);
+// 判断是否为私有/链路本地地址（USB 共享、WiFi 局域网均落在此范围）
+static bool isLocalSubnet(unsigned a, unsigned b, unsigned c, unsigned d) {
+    if (a == 10) return true;                         // 10.0.0.0/8
+    if (a == 172 && b >= 16 && b <= 31) return true;  // 172.16.0.0/12
+    if (a == 192 && b == 168) return true;            // 192.168.0.0/16
+    if (a == 169 && b == 254) return true;            // 169.254.0.0/16 链路本地
+    return false;
+}
 
+// 探测手段 2：枚举本机接口，动态推导手机（网关/服务端）地址，绝不写死段号。
+static void AddInterfaceGateways() {
     ULONG buflen = 0;
     if (GetAdaptersInfo(NULL, &buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0)
         return;
@@ -208,17 +216,81 @@ static void AddUsbTetherGateways() {
     PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)buf.data();
     if (GetAdaptersInfo(pAdapters, &buflen) != NO_ERROR) return;
     for (PIP_ADAPTER_INFO p = pAdapters; p; p = p->Next) {
+        // 优先使用网卡自身上报的真实网关（USB 共享下即手机地址）
+        unsigned ga, gb, gc, gd;
+        if (sscanf(p->GatewayList.IpAddress.String, "%u.%u.%u.%u", &ga, &gb, &gc, &gd) == 4
+            && (ga | gb | gc | gd) != 0) {
+            AddCandidate(p->GatewayList.IpAddress.String);
+        }
         for (PIP_ADDR_STRING addr = &p->IpAddressList; addr; addr = addr->Next) {
             unsigned a, b, c, d;
-            if (sscanf(addr->IpAddress.String, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
-                if (a == 192 && b == 168 && d != 0 && d != 1) {
-                    char gw[32];
-                    snprintf(gw, sizeof(gw), "%u.%u.%u.1", a, b, c);
-                    AddCandidate(gw);
-                }
+            if (sscanf(addr->IpAddress.String, "%u.%u.%u.%u", &a, &b, &c, &d) != 4)
+                continue;
+            if (a == 0 || a == 127 || d == 0 || d == 255)
+                continue; // 跳过 0.0.0.0 / 回环 / 网络号 / 广播
+            // 网卡未上报网关时，推断本子网 .1 为网关（车机自身 w>1，手机一般为 .1）
+            if ((ga | gb | gc | gd) == 0 && d != 1) {
+                char gw[32];
+                snprintf(gw, sizeof(gw), "%u.%u.%u.1", a, b, c);
+                AddCandidate(gw);
             }
         }
     }
+}
+
+// 探测手段 3：主动扫描车机所在私有子网，对 8686 端口做 TCP 探测，开放者即手机。
+// 这是真正的“探测”，不假设手机是 .1，可应对任意 tether/网段拓扑。
+static DWORD WINAPI SubnetScanThread(LPVOID) {
+    while (g_discoveryOn) {
+        if (g_linkUp) { Sleep(1000); continue; }   // 已连上：暂停扫描，不浪费资源/不打扰手机
+        ULONG buflen = 0;
+        if (GetAdaptersInfo(NULL, &buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0) {
+            Sleep(2000); continue;
+        }
+        std::vector<BYTE> buf(buflen);
+        PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)buf.data();
+        if (GetAdaptersInfo(pAdapters, &buflen) != NO_ERROR) { Sleep(2000); continue; }
+
+        for (PIP_ADAPTER_INFO p = pAdapters; p && !g_linkUp; p = p->Next) {
+            for (PIP_ADDR_STRING addr = &p->IpAddressList; addr && !g_linkUp; addr = addr->Next) {
+                unsigned a, b, c, d;
+                if (sscanf(addr->IpAddress.String, "%u.%u.%u.%u", &a, &b, &c, &d) != 4)
+                    continue;
+                if (!isLocalSubnet(a, b, c, d)) continue;
+                if (a == 0 || a == 127 || d == 0 || d == 255) continue;
+                // 扫描该子网 .1..254（先扫网关 .1，命中即停；否则兜底全段扫描）
+                for (unsigned h = 1; h <= 254; h++) {
+                    if (g_linkUp) break;
+                    if (h == d) continue; // 跳过车机自身
+                    char ip[32];
+                    snprintf(ip, sizeof(ip), "%u.%u.%u.%u", a, b, c, h);
+                    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+                    if (s == INVALID_SOCKET) continue;
+                    u_long mode = 1;
+                    ioctlsocket(s, FIONBIO, &mode);
+                    sockaddr_in sa; memset(&sa, 0, sizeof(sa));
+                    sa.sin_family = AF_INET;
+                    sa.sin_port   = htons((u_short)PHONE_PORT);
+                    sa.sin_addr.s_addr = inet_addr(ip);
+                    ::connect(s, (SOCKADDR*)&sa, sizeof(sa)); // 立即返回 WSAEWOULDBLOCK
+                    fd_set wf; FD_ZERO(&wf); FD_SET(s, &wf);
+                    timeval tv; tv.tv_sec = 0; tv.tv_usec = 120000; // 120ms 探测超时
+                    int r = select(0, NULL, &wf, NULL, &tv);
+                    int err = 0, el = sizeof(err);
+                    if (r == 1) getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&err, &el);
+                    mode = 0; ioctlsocket(s, FIONBIO, &mode);
+                    closesocket(s);
+                    if (r == 1 && err == 0) {
+                        AddCandidate(ip);
+                        Log("scan: 探测到手机 %s:%d", ip, PHONE_PORT);
+                        h = 255; // 该子网找到即停，避免无谓扫描
+                    }
+                }
+            }
+        }
+        Sleep(3000); // 一轮扫描后歇一会
+    }
+    return 0;
 }
 
 static DWORD WINAPI DiscoveryThread(LPVOID) {
@@ -234,8 +306,8 @@ static DWORD WINAPI DiscoveryThread(LPVOID) {
         closesocket(s);
         return 0;
     }
-    // USB 网络共享：加入手机(网关/服务端)候选地址（见 AddUsbTetherGateways）
-    AddUsbTetherGateways();
+    // 探测手段 2（接口网关推导）立即做一次，之后持续监听信标(手段1)
+    AddInterfaceGateways();
 
     fd_set rfds;
     timeval tv;
@@ -268,10 +340,15 @@ void NetClient::StartDiscovery() {
     if (g_discoveryOn) return;
     g_discoveryOn = true;
     CreateThread(NULL, 0, DiscoveryThread, NULL, 0, NULL);
+    CreateThread(NULL, 0, SubnetScanThread, NULL, 0, NULL);
 }
 
 void NetClient::StopDiscovery() {
     g_discoveryOn = false;
+}
+
+void NetClient::SetLinkUp(bool up) {
+    g_linkUp = up;
 }
 
 void NetClient::GetCandidates(const std::string& configIP, std::vector<std::string>& out) {

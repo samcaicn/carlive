@@ -1,7 +1,8 @@
 // main.cpp - GLOAI 车机端入口（ARM WinCE 6.0）
 // 关键修复：主(GUI)线程**永远**跑消息泵（GetMessage），窗口才能正常绘制/响应；
 // 网络发现/连接/收帧/心跳全部在后台线程，避免“启动卡死”（窗口创建后无消息循环→不刷新、点不动）。
-// 零配置：手机 App 启动后 UDP 广播自身 IP，本端监听自动连接；USB 直连走固定共享 IP。
+// 零配置：手机 App 启动后 UDP 广播自身 IP，本端监听自动连接；USB 共享网络下通过
+// 主动探测（本机接口网关推导 + 子网 8686 端口扫描）发现手机，不写死任何地址。
 #include "net.h"
 #include "renderer.h"
 #include "decoder.h"
@@ -121,6 +122,7 @@ static DWORD WINAPI ConnThread(LPVOID) {
 
         g_linkAlive = true; g_hbFail = 0;
         g_net->sendHandshakeHeadunit(800, 480);
+        NetClient::SetLinkUp(true);   // 通知探测线程：已连上，暂停主动扫描
         SetStatus(TEXT("GLOAI 车机投屏 · 已连接，镜像中"));
         Log("connected -> handshake sent, spawning recv/heartbeat");
 
@@ -134,6 +136,7 @@ static DWORD WINAPI ConnThread(LPVOID) {
             g_net ? (int)g_net->connected() : -1, (int)g_linkAlive);
         g_net->sendControl(0x04);
         g_net->close();
+        NetClient::SetLinkUp(false);  // 通知探测线程：已断开，恢复主动扫描
         if (hRecv) { WaitForSingleObject(hRecv, 2000); CloseHandle(hRecv); }
         if (hHb)   { WaitForSingleObject(hHb,   2000); CloseHandle(hHb); }
         SetStatus(TEXT("GLOAI 车机投屏 · 连接断开，重新发现…"));

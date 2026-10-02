@@ -33,10 +33,13 @@ public:
     int  codec() const { return m_codec; }   // 0=H264, 1=MJPEG（由 VIDEO_CONFIG 设置）
     SOCKET sock() const { return m_sock; }   // 供积压检测（FIONREAD）使用
 
-    // ---- 自动发现（UDP 信标，端口 8687）----
-    static void StartDiscovery();   // 启动后台监听线程，持续收集手机广播的 IP
+    // ---- 自动发现（纯探测，不写死任何地址）----
+    static void StartDiscovery();   // 启动后台监听/探测线程，持续发现手机 IP
     static void StopDiscovery();
-    // 返回候选 IP 列表：config.txt 显式 IP（若有）优先，其次信标发现，最后内置 USB 共享固定 IP
+    // 链路连通状态标记：由连接线程在握手成功/断开时调用，供探测线程在已连上时暂停，避免无意义探测
+    static void SetLinkUp(bool up);
+    // 返回候选 IP 列表：config.txt 显式 IP（若有）优先，其次【UDP 信标发现的真实 IP】、
+    // 【本机接口网关推导】、【主动扫描子网 8686 端口探测到的 IP】——全部动态，无写死地址
     static void GetCandidates(const std::string& configIP, std::vector<std::string>& out);
 
 private:
