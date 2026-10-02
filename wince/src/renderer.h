@@ -13,6 +13,11 @@ public:
     void blit(HDC dst);
     int width() const { return m_winW; }
     int height() const { return m_winH; }
+    // 当前帧在窗口中的【内容区】矩形（保持宽高比的 letterbox 布局）。
+    // 触摸坐标归一化以此为基准，黑边区域 clamp 到边缘，避免点黑边映射到手机屏外。
+    void contentRect(int& x, int& y, int& w, int& h) const {
+        x = m_cx; y = m_cy; w = m_cw; h = m_ch;
+    }
 
 private:
     HWND m_hwnd;
@@ -22,5 +27,6 @@ private:
     BYTE* m_bits;
     int m_bmpW, m_bmpH;
     int m_winW, m_winH;
+    int m_cx, m_cy, m_cw, m_ch; // 内容区矩形（letterbox 居中）
     void alloc(int w, int h);
 };

@@ -40,6 +40,26 @@ static void SetStatus(const wchar_t* s) {
     if (g_hwnd) { SetWindowText(g_hwnd, s); InvalidateRect(g_hwnd, NULL, FALSE); }
 }
 
+// 把车机屏幕坐标归一化到 [0,1]（供手机端乘自身分辨率）。以【letterbox 内容区】为基准：
+// 竖屏手机投到横屏车机时屏幕两侧为黑边，点黑边应 clamp 到边缘而非映射到手机屏外。
+// 尚未收到首帧（无内容区）时退回全客户区归一化。
+static void computeTouchNorm(HWND hwnd, int x, int y, float& nx, float& ny) {
+    int cx = 0, cy = 0, cw = 0, ch = 0;
+    if (g_renderer) g_renderer->contentRect(cx, cy, cw, ch);
+    if (cw > 0 && ch > 0) {
+        nx = (float)(x - cx) / cw;
+        ny = (float)(y - cy) / ch;
+    } else {
+        RECT rc; GetClientRect(hwnd, &rc);
+        float w = rc.right  ? (float)rc.right  : 1.0f;
+        float h = rc.bottom ? (float)rc.bottom : 1.0f;
+        nx = (float)x / w;
+        ny = (float)y / h;
+    }
+    if (nx < 0) nx = 0; else if (nx > 1) nx = 1;
+    if (ny < 0) ny = 0; else if (ny > 1) ny = 1;
+}
+
 // 读取同目录 config.txt 的显式 IP（可选覆盖）。支持：注释行(#开头)、空行、
 // 「host」「host port」「host:port」「host=...」。无有效配置则返回空（纯自动发现）。
 static std::string readConfig() {
@@ -79,7 +99,12 @@ static std::string readConfig() {
 static DWORD WINAPI RecvThread(LPVOID) {
     VideoFrame f;
     while (g_running && g_net && g_net->connected()) {
-        if (!g_net->recvVideoFrame(f)) break;
+        if (!g_net->recvVideoFrame(f)) {
+            // 对端关闭/协议错位：立即标记断链，触发 ConnThread 秒级重连，
+            // 不必等心跳(3s×2)判定，避免车机长时间显示“镜像中”却实则黑屏。
+            if (g_running && g_net && g_net->connected()) g_linkAlive = false;
+            break;
+        }
         g_linkAlive = true;
         // 防积压：车机解码跟不上发送节奏时，内核收包缓冲会堆积，延迟将无限累积。
         // 堆积超过阈值则跳过本帧解码（继续收包排空积压），只解最新的帧。
@@ -145,14 +170,29 @@ static DWORD WINAPI ConnThread(LPVOID) {
         g_linkAlive = true; g_hbFail = 0;
         g_net->sendHandshakeHeadunit(800, 480);
         NetClient::SetLinkUp(true);   // 通知探测线程：已连上，暂停主动扫描
-        SetStatus(TEXT("GLOAI 车机投屏 · 已连接，镜像中"));
+        SetStatus(TEXT("GLOAI 车机投屏 · 已连接，等待手机画面…"));
         Log("connected -> handshake sent, spawning recv/heartbeat");
 
         HANDLE hRecv = CreateThread(NULL, 0, RecvThread, NULL, 0, NULL);
         HANDLE hHb   = CreateThread(NULL, 0, HeartbeatThread, NULL, 0, NULL);
 
-        // 等待断线（对端关闭 或 心跳连续失败）
-        while (g_running && g_net->connected() && g_linkAlive) Sleep(200);
+        // 等待断线（对端关闭 或 心跳连续失败）。连上后若 6s 内未收到任何视频帧，
+        // 明确提示“手机未发送画面”（多为 GLOAI App 未授权录屏/未在前台），避免用户
+        // 误以为已镜像却黑屏、无从排障。
+        DWORD t0 = GetTickCount();
+        bool shownMirroring = false;
+        while (g_running && g_net->connected() && g_linkAlive) {
+            if (!shownMirroring) {
+                if (g_hasFrame) {
+                    SetStatus(TEXT("GLOAI 车机投屏 · 已连接，镜像中"));
+                    shownMirroring = true;
+                } else if (GetTickCount() - t0 > 6000) {
+                    SetStatus(TEXT("GLOAI 车机投屏 · 已连接，但手机未发送画面\r\n请确认手机 GLOAI App 已允许录屏并在前台运行"));
+                    shownMirroring = true;
+                }
+            }
+            Sleep(200);
+        }
 
         Log("disconnect detected (connected=%d linkAlive=%d)",
             g_net ? (int)g_net->connected() : -1, (int)g_linkAlive);
@@ -187,10 +227,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN: {
         int x = (int)(short)LOWORD(lp);
         int y = (int)(short)HIWORD(lp);
-        RECT rc; GetClientRect(hwnd, &rc);
-        float nx = (float)x / (rc.right  ? rc.right  : 1);
-        float ny = (float)y / (rc.bottom ? rc.bottom : 1);
-        if (g_net) g_net->sendTouch(0x00, nx, ny);   // DOWN
+            float nx = 0, ny = 0;
+            computeTouchNorm(hwnd, x, y, nx, ny);
+            if (g_net) g_net->sendTouch(0x00, nx, ny);   // DOWN
         break;
     }
     case WM_MOUSEMOVE:
@@ -203,9 +242,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 s_lastMove = now;
                 int x = (int)(short)LOWORD(lp);
                 int y = (int)(short)HIWORD(lp);
-                RECT rc; GetClientRect(hwnd, &rc);
-                float nx = (float)x / (rc.right  ? rc.right  : 1);
-                float ny = (float)y / (rc.bottom ? rc.bottom : 1);
+                float nx = 0, ny = 0;
+                computeTouchNorm(hwnd, x, y, nx, ny);
                 if (g_net) g_net->sendTouch(0x01, nx, ny); // MOVE
             }
         }
@@ -213,10 +251,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONUP: {
         int x = (int)(short)LOWORD(lp);
         int y = (int)(short)HIWORD(lp);
-        RECT rc; GetClientRect(hwnd, &rc);
-        float nx = (float)x / (rc.right  ? rc.right  : 1);
-        float ny = (float)y / (rc.bottom ? rc.bottom : 1);
-        if (g_net) g_net->sendTouch(0x02, nx, ny);   // UP
+            float nx = 0, ny = 0;
+            computeTouchNorm(hwnd, x, y, nx, ny);
+            if (g_net) g_net->sendTouch(0x02, nx, ny);   // UP
         break;
     }
     case WM_DESTROY:

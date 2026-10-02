@@ -59,6 +59,7 @@ bool NetClient::connect(const std::wstring& host, int port) {
 }
 
 bool NetClient::connectTimeout(const std::wstring& host, int port, int timeoutMs) {
+    close(); // 防御：丢弃任何残留 socket，避免重连路径下泄漏/复用旧连接
     char buf[64];
     WideCharToMultiByte(CP_ACP, 0, host.c_str(), -1, buf, sizeof(buf), NULL, NULL);
     sockaddr_in sa = {0};
