@@ -13,6 +13,7 @@
 
     <!-- 状态可见：触摸回注 / 录屏授权 / 连接 -->
     <string name="btn_a11y">开启无障碍服务（触摸回注）</string>
+    <string name="btn_battery">加入电池白名单（防后台冻结）</string>
     <string name="touch_ready">触摸回注：已开启</string>
     <string name="touch_off">触摸回注：未开启（车机点不了手机）</string>
     <string name="media_ready">录屏授权：已获取</string>

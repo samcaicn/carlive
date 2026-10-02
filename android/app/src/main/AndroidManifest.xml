@@ -14,6 +14,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
+    <!-- 保活：CPU 常驻(防后台冻结) + 申请忽略电池优化(根治 OnePlus 等 OEM 后台杀进程导致 8686 失活) -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <!-- 悬浮窗（可选，用于镜像状态提示） -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 

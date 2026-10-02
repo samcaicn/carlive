@@ -5,12 +5,15 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.provider.Settings
 import android.view.View
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityManager
 import android.widget.Button
 import android.widget.TextView
@@ -43,10 +46,16 @@ class MainActivity : AppCompatActivity() {
 
         tvStatus = findViewById(R.id.tvStatus)
 
+        // 屏幕常亮：MediaProjection 在息屏后多数机型会停止/黑屏，保持屏幕点亮才能保证持续投屏。
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
         findViewById<Button>(R.id.btnStart).setOnClickListener { startMirror() }
         findViewById<Button>(R.id.btnStop).setOnClickListener { stopMirror() }
         findViewById<Button>(R.id.btnA11y).setOnClickListener {
             openAccessibilitySettings()
+        }
+        findViewById<Button>(R.id.btnBattery).setOnClickListener {
+            requestIgnoreBatteryOptimizations()
         }
 
         // 首次进入即请求录屏授权，授权后自动启动投屏服务（车机端会被自动发现并连接）。
@@ -85,6 +94,28 @@ class MainActivity : AppCompatActivity() {
 
     private fun openAccessibilitySettings() {
         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+    }
+
+    /** 是否已被加入电池优化白名单（未加入时后台会被 OEM 冻结，导致 8686 失活、车机连不上）。 */
+    private fun isIgnoringBatteryOptimizations(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+        return pm?.isIgnoringBatteryOptimizations(packageName) ?: true
+    }
+
+    /** 引导用户把本 App 加入电池优化白名单（根治 OnePlus 等 OEM 后台杀进程）。 */
+    private fun requestIgnoreBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        try {
+            startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:$packageName")
+            })
+        } catch (_: Exception) {
+            // 部分 ROM 无此 Action，退回通用电池优化设置页
+            try {
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            } catch (_: Exception) { }
+        }
     }
 
     /**
@@ -132,6 +163,10 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btnA11y).visibility =
             if (a11y) View.GONE else View.VISIBLE
+
+        // 未加入电池白名单时显示入口（加入后隐藏）
+        findViewById<Button>(R.id.btnBattery).visibility =
+            if (isIgnoringBatteryOptimizations()) View.GONE else View.VISIBLE
 
         val link = when {
             MirrorState.net != null -> getString(R.string.link_streaming)

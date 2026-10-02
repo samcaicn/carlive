@@ -11,8 +11,8 @@ android {
         applicationId "com.gloai.mirror"
         minSdk 21           // Android 5.0，MediaProjection 起点
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        versionCode 2
+        versionName "1.1"
     }
 
     buildTypes {

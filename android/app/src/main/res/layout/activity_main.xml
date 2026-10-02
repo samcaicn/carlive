@@ -42,6 +42,15 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content" />
 
+    <!-- 未加入电池白名单时显示：跳设置把本 App 加入电池优化白名单（防后台冻结导致 8686 失活） -->
+    <Button
+        android:id="@+id/btnBattery"
+        android:text="@string/btn_battery"
+        android:visibility="gone"
+        android:layout_marginTop="8dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
     <TextView
         android:id="@+id/tvStatus"
         android:text="@string/status_idle"

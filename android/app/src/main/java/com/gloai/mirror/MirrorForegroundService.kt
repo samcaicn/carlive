@@ -17,6 +17,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
@@ -38,6 +39,8 @@ class MirrorForegroundService : Service() {
     private var beacon: BeaconSender? = null
     private var sender: MjpegSender? = null
     private var usbReceiver: BroadcastReceiver? = null
+    // CPU 常驻锁：镜像期间保持 CPU 唤醒，避免系统息屏/省电把采集与发送线程挂起（与电池白名单配合根治后台冻结）。
+    private var wakeLock: PowerManager.WakeLock? = null
 
     companion object {
         const val ACTION_START = "com.gloai.mirror.START"
@@ -127,6 +130,13 @@ class MirrorForegroundService : Service() {
             pendingData = null
         }
         isRunning = true
+        // 申请 CPU 常驻锁（PARTIAL_WAKE_LOCK：仅保 CPU 唤醒，不影响系统息屏策略；屏幕常亮由 MainActivity 的 FLAG_KEEP_SCREEN_ON 负责）
+        if (wakeLock == null) {
+            val pm = getSystemService(PowerManager::class.java)
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GLOAI::MirrorCpu")
+            wakeLock?.setReferenceCounted(false)
+        }
+        if (wakeLock?.isHeld != true) wakeLock?.acquire()
         if (beacon == null) {
             beacon = BeaconSender(Protocol.PORT_DEFAULT).also { it.start() }
         }
@@ -236,6 +246,8 @@ class MirrorForegroundService : Service() {
         usbReceiver = null
         try { MirrorState.mediaProjection?.stop() } catch (_: Exception) { }
         MirrorState.mediaProjection = null
+        if (wakeLock?.isHeld == true) wakeLock?.release()
+        wakeLock = null
     }
 
     override fun onDestroy() {
