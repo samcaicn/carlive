@@ -38,9 +38,11 @@ public:
     static void StopDiscovery();
     // 链路连通状态标记：由连接线程在握手成功/断开时调用，供探测线程在已连上时暂停，避免无意义探测
     static void SetLinkUp(bool up);
-    // 返回候选 IP 列表：config.txt 显式 IP（若有）优先，其次【UDP 信标发现的真实 IP】、
-    // 【本机接口网关推导】、【主动扫描子网 8686 端口探测到的 IP】——全部动态，无写死地址
+    // 返回候选 IP 列表：config.txt 显式 IP（若有）优先，其次【高可信候选】——
+    //   含 UDP 信标发现的真实 IP、本机接口网关推导、主动扫描确认。全部动态，无写死地址。
     static void GetCandidates(const std::string& configIP, std::vector<std::string>& out);
+    // 高可信候选数量（信标/网关/扫描命中）。UI 据此区分“正在连接”还是“正在全网扫描”。
+    static int  PriorityCount();
 
 private:
     SOCKET m_sock;

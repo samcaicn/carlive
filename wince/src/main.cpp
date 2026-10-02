@@ -111,12 +111,19 @@ static DWORD WINAPI ConnThread(LPVOID) {
         while (g_running && !ok) {
             std::vector<std::string> cands;
             NetClient::GetCandidates(cfg, cands);
+            if (cands.empty()) {
+                // 还没有任何候选：后台轻量扫描在跑，提示“正在扫描”但不要卡住 UI/系统
+                SetStatus(TEXT("GLOAI 车机投屏 · 未发现手机，正在扫描网络…"));
+                Sleep(1000);
+                continue;
+            }
+            // 有高可信候选（信标/网关/.1）：快速逐个连接，几乎秒连，不依赖全段扫描
+            SetStatus(TEXT("GLOAI 车机投屏 · 正在连接手机…"));
             for (size_t i = 0; i < cands.size() && !ok; i++) {
-                SetStatus(TEXT("GLOAI 车机投屏 · 自动发现手机…"));
                 Log("try connect %s:8686", cands[i].c_str());
                 if (g_net->connectTimeout(A2W(cands[i].c_str()), 8686, 1500)) ok = true;
             }
-            if (!ok) Sleep(1000);
+            if (!ok) Sleep(500); // 本轮候选均未响应，稍后（扫描线程可能已补充新候选）再试
         }
         if (!g_running) break;
 

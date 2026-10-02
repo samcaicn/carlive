@@ -183,19 +183,25 @@ static const int DISCOVERY_PORT = 8687;
 static const int PHONE_PORT    = 8686;
 
 static CRITICAL_SECTION g_csCand;
-static std::vector<std::string> g_beaconIPs;   // 信标/扫描发现的手机 IP
+static std::vector<std::string> g_priIPs;      // 高可信候选：UDP 信标真实IP + 接口网关推导 + 扫描确认
 static volatile bool g_discoveryOn = false;
-static volatile bool g_linkUp      = false;    // 链路已连通（握手成功）→ 暂停探测
+static volatile bool g_linkUp      = false;    // 链路已连通（握手成功）→ 暂停扫描
 
-static void AddCandidate(const char* ip) {
+static bool HasIP(const std::vector<std::string>& v, const char* ip) {
+    for (size_t i = 0; i < v.size(); i++) if (v[i] == ip) return true;
+    return false;
+}
+static void AddPriority(const char* ip) {
     if (!ip || !*ip) return;
     EnterCriticalSection(&g_csCand);
-    bool found = false;
-    for (size_t i = 0; i < g_beaconIPs.size(); i++) {
-        if (g_beaconIPs[i] == ip) { found = true; break; }
-    }
-    if (!found) g_beaconIPs.push_back(ip);
+    if (!HasIP(g_priIPs, ip)) g_priIPs.push_back(ip);
     LeaveCriticalSection(&g_csCand);
+}
+static int PriorityCount() {
+    EnterCriticalSection(&g_csCand);
+    int n = (int)g_priIPs.size();
+    LeaveCriticalSection(&g_csCand);
+    return n;
 }
 
 // 判断是否为私有/链路本地地址（USB 共享、WiFi 局域网均落在此范围）
@@ -220,7 +226,7 @@ static void AddInterfaceGateways() {
         unsigned ga, gb, gc, gd;
         if (sscanf(p->GatewayList.IpAddress.String, "%u.%u.%u.%u", &ga, &gb, &gc, &gd) == 4
             && (ga | gb | gc | gd) != 0) {
-            AddCandidate(p->GatewayList.IpAddress.String);
+            AddPriority(p->GatewayList.IpAddress.String);
         }
         for (PIP_ADDR_STRING addr = &p->IpAddressList; addr; addr = addr->Next) {
             unsigned a, b, c, d;
@@ -232,17 +238,43 @@ static void AddInterfaceGateways() {
             if ((ga | gb | gc | gd) == 0 && d != 1) {
                 char gw[32];
                 snprintf(gw, sizeof(gw), "%u.%u.%u.1", a, b, c);
-                AddCandidate(gw);
+                AddPriority(gw);
             }
         }
     }
 }
 
-// 探测手段 3：主动扫描车机所在私有子网，对 8686 端口做 TCP 探测，开放者即手机。
-// 这是真正的“探测”，不假设手机是 .1，可应对任意 tether/网段拓扑。
+// 对单个 IP 的 8686 端口做快速 TCP 探测：开放返回 true。超时短，避免拖慢连接。
+static bool probePort(unsigned a, unsigned b, unsigned c, unsigned d, int timeoutMs) {
+    char ip[32]; snprintf(ip, sizeof(ip), "%u.%u.%u.%u", a, b, c, d);
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) return false;
+    setNoDelay(s);
+    u_long mode = 1; ioctlsocket(s, FIONBIO, &mode);
+    sockaddr_in sa; memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port   = htons((u_short)PHONE_PORT);
+    sa.sin_addr.s_addr = inet_addr(ip);
+    ::connect(s, (SOCKADDR*)&sa, sizeof(sa)); // 立即返回 WSAEWOULDBLOCK
+    fd_set wf; FD_ZERO(&wf); FD_SET(s, &wf);
+    timeval tv; tv.tv_sec = timeoutMs/1000; tv.tv_usec = (timeoutMs%1000)*1000;
+    int r = select(0, NULL, &wf, NULL, &tv);
+    int err = 0, el = sizeof(err);
+    if (r == 1) getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&err, &el);
+    mode = 0; ioctlsocket(s, FIONBIO, &mode);
+    closesocket(s);
+    return (r == 1 && err == 0);
+}
+
+// 探测手段 3（主动扫描，【轻量】防止单核 WinCE 卡顿）：
+//   阶段1：优先探测“真实网关 / 子网 .1”——USB 共享网络下手机即网关，几乎必中，秒级连接；
+//   阶段2：仅当【毫无任何高可信候选】（非标准 tether 拓扑/异常网络）才做全段扫描兜底，
+//          且每地址 Sleep(8) 节流，避免 254 次探测把 CPU 占满导致系统卡死。
+//   每轮扫描后 Sleep(5000)，不空转。链路已连上时整段暂停。
 static DWORD WINAPI SubnetScanThread(LPVOID) {
     while (g_discoveryOn) {
         if (g_linkUp) { Sleep(1000); continue; }   // 已连上：暂停扫描，不浪费资源/不打扰手机
+
         ULONG buflen = 0;
         if (GetAdaptersInfo(NULL, &buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0) {
             Sleep(2000); continue;
@@ -251,44 +283,53 @@ static DWORD WINAPI SubnetScanThread(LPVOID) {
         PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)buf.data();
         if (GetAdaptersInfo(pAdapters, &buflen) != NO_ERROR) { Sleep(2000); continue; }
 
+        // 阶段1：快速确认网关 / .1（轻量，通常一轮即命中）
         for (PIP_ADAPTER_INFO p = pAdapters; p && !g_linkUp; p = p->Next) {
+            unsigned ga, gb, gc, gd;
+            bool hasGw = (sscanf(p->GatewayList.IpAddress.String, "%u.%u.%u.%u", &ga, &gb, &gc, &gd) == 4
+                          && (ga | gb | gc | gd) != 0);
             for (PIP_ADDR_STRING addr = &p->IpAddressList; addr && !g_linkUp; addr = addr->Next) {
                 unsigned a, b, c, d;
-                if (sscanf(addr->IpAddress.String, "%u.%u.%u.%u", &a, &b, &c, &d) != 4)
-                    continue;
+                if (sscanf(addr->IpAddress.String, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) continue;
                 if (!isLocalSubnet(a, b, c, d)) continue;
                 if (a == 0 || a == 127 || d == 0 || d == 255) continue;
-                // 扫描该子网 .1..254（先扫网关 .1，命中即停；否则兜底全段扫描）
-                for (unsigned h = 1; h <= 254; h++) {
-                    if (g_linkUp) break;
-                    if (h == d) continue; // 跳过车机自身
-                    char ip[32];
-                    snprintf(ip, sizeof(ip), "%u.%u.%u.%u", a, b, c, h);
-                    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-                    if (s == INVALID_SOCKET) continue;
-                    u_long mode = 1;
-                    ioctlsocket(s, FIONBIO, &mode);
-                    sockaddr_in sa; memset(&sa, 0, sizeof(sa));
-                    sa.sin_family = AF_INET;
-                    sa.sin_port   = htons((u_short)PHONE_PORT);
-                    sa.sin_addr.s_addr = inet_addr(ip);
-                    ::connect(s, (SOCKADDR*)&sa, sizeof(sa)); // 立即返回 WSAEWOULDBLOCK
-                    fd_set wf; FD_ZERO(&wf); FD_SET(s, &wf);
-                    timeval tv; tv.tv_sec = 0; tv.tv_usec = 120000; // 120ms 探测超时
-                    int r = select(0, NULL, &wf, NULL, &tv);
-                    int err = 0, el = sizeof(err);
-                    if (r == 1) getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&err, &el);
-                    mode = 0; ioctlsocket(s, FIONBIO, &mode);
-                    closesocket(s);
-                    if (r == 1 && err == 0) {
-                        AddCandidate(ip);
-                        Log("scan: 探测到手机 %s:%d", ip, PHONE_PORT);
-                        h = 255; // 该子网找到即停，避免无谓扫描
+                if (hasGw) {
+                    if (probePort(ga, gb, gc, gd, 100)) {
+                        AddPriority(p->GatewayList.IpAddress.String);
+                        Log("scan: 网关命中 %s:%d", p->GatewayList.IpAddress.String, PHONE_PORT);
+                    }
+                } else if (d != 1) {
+                    if (probePort(a, b, c, 1, 100)) {
+                        char gw[32]; snprintf(gw, sizeof(gw), "%u.%u.%u.1", a, b, c);
+                        AddPriority(gw);
+                        Log("scan: .1 命中 %s:%d", gw, PHONE_PORT);
                     }
                 }
             }
         }
-        Sleep(3000); // 一轮扫描后歇一会
+
+        // 阶段2：仅当无任何高可信候选时，全段扫描兜底（节流保护 CPU）
+        if (!g_linkUp && PriorityCount() == 0) {
+            for (PIP_ADAPTER_INFO p = pAdapters; p && !g_linkUp; p = p->Next) {
+                for (PIP_ADDR_STRING addr = &p->IpAddressList; addr && !g_linkUp; addr = addr->Next) {
+                    unsigned a, b, c, d;
+                    if (sscanf(addr->IpAddress.String, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) continue;
+                    if (!isLocalSubnet(a, b, c, d)) continue;
+                    if (a == 0 || a == 127 || d == 0 || d == 255) continue;
+                    for (unsigned h = 1; h <= 254 && !g_linkUp; h++) {
+                        if (h == d) continue; // 跳过车机自身
+                        if (probePort(a, b, c, h, 60)) {
+                            char ip[32]; snprintf(ip, sizeof(ip), "%u.%u.%u.%u", a, b, c, h);
+                            AddPriority(ip);
+                            Log("scan: 全段命中 %s:%d", ip, PHONE_PORT);
+                            h = 255; // 该子网找到即停
+                        }
+                        Sleep(8); // 节流：避免单核 WinCE CPU 满载导致系统卡顿
+                    }
+                }
+            }
+        }
+        Sleep(5000); // 一轮后歇久一点，不空转
     }
     return 0;
 }
@@ -326,7 +367,7 @@ static DWORD WINAPI DiscoveryThread(LPVOID) {
                 if (strncmp(buf, "GLOAI|", 6) == 0) {
                     char* ip = buf + 6;
                     char* sep = strchr(ip, '|');
-                    if (sep) { *sep = 0; AddCandidate(ip); }
+                    if (sep) { *sep = 0; AddPriority(ip); }
                 }
             }
         }
@@ -355,6 +396,6 @@ void NetClient::GetCandidates(const std::string& configIP, std::vector<std::stri
     out.clear();
     if (!configIP.empty()) out.push_back(configIP); // 显式覆盖优先
     EnterCriticalSection(&g_csCand);
-    for (size_t i = 0; i < g_beaconIPs.size(); i++) out.push_back(g_beaconIPs[i]);
+    for (size_t i = 0; i < g_priIPs.size(); i++) out.push_back(g_priIPs[i]);
     LeaveCriticalSection(&g_csCand);
 }
