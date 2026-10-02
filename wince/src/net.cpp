@@ -30,6 +30,14 @@ static void setKeepAlive(SOCKET s) {
     setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, (const char*)&one, sizeof(one));
 }
 
+// 接收超时：保证任何 recv 不会永久阻塞——对端异常静默（无 RST、无数据）时 5s 内返回，
+// 触发断链重连，作为 close() 之外的双保险。取 5s > 心跳间隔(3s)，避免正常空闲（仅有心跳）被误判断链。
+static void setRecvTimeout(SOCKET s) {
+    if (s == INVALID_SOCKET) return;
+    int to = 5000;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&to, sizeof(to));
+}
+
 NetClient::NetClient() : m_sock(INVALID_SOCKET), m_codec(1) {
     WSADATA wsa = {0};
     WSAStartup(MAKEWORD(2,2), &wsa);
@@ -52,6 +60,7 @@ bool NetClient::connect(const std::wstring& host, int port) {
     if (m_sock == INVALID_SOCKET) return false;
     setNoDelay(m_sock);
     setKeepAlive(m_sock);
+    setRecvTimeout(m_sock);
     if (::connect(m_sock, (SOCKADDR*)&sa, sizeof(sa)) == SOCKET_ERROR) {
         close(); return false;
     }
@@ -88,7 +97,7 @@ bool NetClient::connectTimeout(const std::wstring& host, int port, int timeoutMs
         ok = (err == 0);
     }
     mode = 0; ioctlsocket(s, FIONBIO, &mode);
-    if (ok) { m_sock = s; return true; }
+    if (ok) { setRecvTimeout(s); m_sock = s; return true; }
     closesocket(s);
     return false;
 }
@@ -133,6 +142,7 @@ void NetClient::sendHandshakeHeadunit(int maxW, int maxH) {
 }
 
 void NetClient::sendTouch(BYTE action, float nx, float ny) {
+    if (m_sock == INVALID_SOCKET) return;   // 未连接时直接丢弃，避免无谓加锁/失败发送
     BYTE p[10];
     p[0] = action;
     // float 大端
@@ -180,6 +190,12 @@ bool NetClient::recvVideoFrame(VideoFrame& out) {
             out.timestamp = (payload[1]<<24)|(payload[2]<<16)|(payload[3]<<8)|payload[4];
             int dlen = (payload[5]<<24)|(payload[6]<<16)|(payload[7]<<8)|payload[8];
             if (dlen < 0 || (size_t)dlen > payload.size()-9) continue;
+            // 反压：若内核收包缓冲仍堆积大量数据，说明本端解码跟不上发送节奏，
+            // 直接丢弃本帧继续读下一帧（取最新），避免无意义解码与内存拷贝。
+            u_long backlog = 0;
+            if (ioctlsocket(m_sock, FIONREAD, &backlog) == 0 && backlog > 96*1024) {
+                continue;
+            }
             out.data.assign(payload.begin()+9, payload.begin()+9 + dlen);
             return true;
         } else if (type == 0x02) { // VIDEO_CONFIG：记录编解码类型
@@ -430,6 +446,12 @@ void NetClient::StopDiscovery() {
 
 void NetClient::SetLinkUp(bool up) {
     g_linkUp = up;
+}
+
+void NetClient::ClearScanned() {
+    EnterCriticalSection(&g_csCand);
+    g_priIPs.clear();   // 仅清扫描/网关候选；g_beaconIP 保留（信标持续刷新）
+    LeaveCriticalSection(&g_csCand);
 }
 
 void NetClient::GetCandidates(const std::string& configIP, std::vector<std::string>& out) {

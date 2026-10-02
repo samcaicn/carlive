@@ -38,6 +38,9 @@ public:
     static void StopDiscovery();
     // 链路连通状态标记：由连接线程在握手成功/断开时调用，供探测线程在已连上时暂停，避免无意义探测
     static void SetLinkUp(bool up);
+    // 清空【已扫描/网关推导】候选（保留 UDP 信标 IP）。连接成功后调用：当前连接已采纳，
+    // 旧候选若失效会拖累重连（白等 1.5s×N），下次断开重连由扫描线程重新发现。
+    static void ClearScanned();
     // 返回候选 IP 列表：config.txt 显式 IP（若有）优先，其次【高可信候选】——
     //   含 UDP 信标发现的真实 IP、本机接口网关推导、主动扫描确认。全部动态，无写死地址。
     static void GetCandidates(const std::string& configIP, std::vector<std::string>& out);

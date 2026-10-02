@@ -105,13 +105,7 @@ static DWORD WINAPI RecvThread(LPVOID) {
             if (g_running && g_net && g_net->connected()) g_linkAlive = false;
             break;
         }
-        g_linkAlive = true;
-        // 防积压：车机解码跟不上发送节奏时，内核收包缓冲会堆积，延迟将无限累积。
-        // 堆积超过阈值则跳过本帧解码（继续收包排空积压），只解最新的帧。
-        u_long backlog = 0;
-        if (ioctlsocket(g_net->sock(), FIONREAD, &backlog) == 0 && backlog > 96*1024) {
-            continue;
-        }
+        g_linkAlive = true; // 收到数据，链路活跃
         std::vector<BYTE> rgb; int w = 0, h = 0;
         if (g_decoder.decode((BYTE)g_net->codec(), f.data.data(), (int)f.data.size(), rgb, w, h)) {
             if (g_renderer) g_renderer->present(rgb.data(), w, h);
@@ -170,6 +164,7 @@ static DWORD WINAPI ConnThread(LPVOID) {
         g_linkAlive = true; g_hbFail = 0;
         g_net->sendHandshakeHeadunit(800, 480);
         NetClient::SetLinkUp(true);   // 通知探测线程：已连上，暂停主动扫描
+        NetClient::ClearScanned();    // 清掉已采纳之外的旧候选，避免重连时白等失效 IP
         SetStatus(TEXT("GLOAI 车机投屏 · 已连接，等待手机画面…"));
         Log("connected -> handshake sent, spawning recv/heartbeat");
 
@@ -186,8 +181,10 @@ static DWORD WINAPI ConnThread(LPVOID) {
                 if (g_hasFrame) {
                     SetStatus(TEXT("GLOAI 车机投屏 · 已连接，镜像中"));
                     shownMirroring = true;
-                } else if (GetTickCount() - t0 > 6000) {
-                    SetStatus(TEXT("GLOAI 车机投屏 · 已连接，但手机未发送画面\r\n请确认手机 GLOAI App 已允许录屏并在前台运行"));
+                } else if (GetTickCount() - t0 > 10000) {
+                    // 措辞中性：手机从点启动到真正出帧（授权弹窗+MediaProjection 初始化）可能 >6s，
+                    // 不宜武断判定“未发送画面”，仅作信息性提示。
+                    SetStatus(TEXT("GLOAI 车机投屏 · 已连接，正在等待手机画面…\r\n（若长时间黑屏，请确认手机 GLOAI App 已允许录屏并在前台运行）"));
                     shownMirroring = true;
                 }
             }
@@ -219,7 +216,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             FillRect(hdc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
             SetTextColor(hdc, RGB(0, 200, 255));
             SetBkMode(hdc, TRANSPARENT);
-            DrawText(hdc, g_statusText, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            // 支持多行状态文本（含 \r\n 的排障提示）：DT_SINGLELINE 会忽略 \r\n，
+            // 故先以 DT_CALCRECT 量出文本高度，再整体垂直居中绘制。
+            RECT tr = rc;
+            DrawText(hdc, g_statusText, -1, &tr, DT_CENTER | DT_WORDBREAK | DT_CALCRECT);
+            int th = tr.bottom - tr.top;
+            RECT dr = rc; dr.top += (rc.bottom - th) / 2;
+            DrawText(hdc, g_statusText, -1, &dr, DT_CENTER | DT_WORDBREAK);
         }
         EndPaint(hwnd, &ps);
         return 0;
