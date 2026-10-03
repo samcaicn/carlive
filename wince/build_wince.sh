@@ -25,6 +25,8 @@ echo ">> building $OUT"
   -o "$OUT" \
   -lws2 -liphlpapi \
   -static-libgcc -static-libstdc++
+# 注意：-liphlpapi 必须带上（net.cpp 用 GetAdaptersInfo 枚举网卡找网关），
+# 缺了会 undefined reference to `GetAdaptersInfo` 链接失败。
 # 注意：arm-mingw32ce 工具链默认子系统即 Windows CE（PE Subsystem=9, WINDOWS_CE_GUI），
 # 且默认入口为 WinMain（见 cegcc 文档）。显式写 --subsystem,windowsce 反而被 ld 拒绝，
 # 故不传该 flag，由工具链默认值产出 CE 可执行文件。
