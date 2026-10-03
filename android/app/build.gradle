@@ -1,6 +1,17 @@
+import java.util.Properties
+
 plugins {
     id 'com.android.application'
     id 'kotlin-android'
+}
+
+// 发布签名：从 android/key.properties 读（该文件不入仓，由 CI 用 secrets 注入后生成）。
+// 没有它就直接抛异常，绝不静默退回 debug key。
+def keystorePropsFile = rootProject.file('key.properties')
+def keystoreProps = new Properties()
+def hasKeystore = keystorePropsFile.exists()
+if (hasKeystore) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
 }
 
 android {
@@ -15,12 +26,27 @@ android {
         versionName "1.1"
     }
 
+    signingConfigs {
+        if (!hasKeystore) {
+            // 硬失败而非退回 debug key：debug keystore 每次 CI runner 都是新生成的，
+            // 签名随之改变 → 覆盖安装必报 INSTALL_FAILED_UPDATE_INCOMPATIBLE。
+            throw new GradleException(
+                "android/key.properties 不存在，拒绝用 debug key 打包 release。" +
+                "请注入 keystore（见 .github/workflows/build.yml 的 'Restore signing keystore' 步骤）。")
+        }
+        release {
+            storeFile rootProject.file(keystoreProps['storeFile'] as String)
+            storePassword keystoreProps['storePassword'] as String
+            keyAlias keystoreProps['keyAlias'] as String
+            keyPassword keystoreProps['keyPassword'] as String
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            // CI 无发布签名密钥：复用 debug keystore 产出可安装 APK（满足手机安装/调试需求）
-            signingConfig signingConfigs.debug
+            signingConfig signingConfigs.release
         }
     }
 

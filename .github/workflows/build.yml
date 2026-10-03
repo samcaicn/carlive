@@ -37,8 +37,57 @@ jobs:
           echo "/opt/gradle/gradle-8.6/bin" >> "$GITHUB_PATH"
       - name: Point project at SDK
         run: echo "sdk.dir=$ANDROID_HOME" > android/local.properties
+      - name: Restore signing keystore
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_KEY:-}" ] || [ -z "${SIGNING_STORE_PASSWORD:-}" ]; then
+            echo "ERROR: secrets SIGNING_KEY / SIGNING_STORE_PASSWORD 未配置" >&2
+            exit 1
+          fi
+          KS=android/app/tuptup-release.jks
+          # SIGNING_KEY 可能是纯 base64（GitHub 官方模板做法），也可能已是二进制；两种都兼容。
+          # 判据交给 keytool：解出来的必须能当keystore 打开，否则回退到原始字节。
+          restore_ok=0
+          if printf '%s' "$SIGNING_KEY" | base64 -d > "$KS" 2>/dev/null && [ -s "$KS" ]; then
+            if keytool -list -keystore "$KS" -storepass "$SIGNING_STORE_PASSWORD" >/tmp/ks.txt 2>&1; then
+              echo "source: base64"; restore_ok=1
+            else
+              echo "base64 解码结果不是有效 keystore，改用原始字节"
+            fi
+          fi
+          if [ "$restore_ok" -eq 0 ]; then
+            printf '%s' "$SIGNING_KEY" > "$KS"
+            keytool -list -keystore "$KS" -storepass "$SIGNING_STORE_PASSWORD" >/tmp/ks.txt 2>&1 \
+              || { echo "ERROR: keystore 打不开（store password 不对或内容不是 JKS/PKCS12）"; cat /tmp/ks.txt; exit 1; }
+            echo "source: raw"
+          fi
+          grep -q 'PrivateKeyEntry' /tmp/ks.txt \
+            || { echo "ERROR: keystore 内没有 PrivateKeyEntry，无法用于签名"; cat /tmp/ks.txt; exit 1; }
+          # alias 以 keystore 实际内容为准：secret 名给的可能是密码而非 alias
+          KEY_PASS="${SIGNING_KEY_PASSWORD:-$SIGNING_STORE_PASSWORD}"
+          ALIAS=""
+          while IFS= read -r a; do
+            [ -n "$a" ] && ALIAS="$a" && break
+          done < <(grep 'PrivateKeyEntry' /tmp/ks.txt | awk -F', ' '{print $1}')
+          [ -n "$ALIAS" ] || { echo "ERROR: 未能从 keystore 解析出 alias"; cat /tmp/ks.txt; exit 1; }
+          echo "keystore ok, alias=$ALIAS"
+          {
+            echo "storeFile=app/tuptup-release.jks"
+            echo "storePassword=$SIGNING_STORE_PASSWORD"
+            echo "keyAlias=$ALIAS"
+            echo "keyPassword=$KEY_PASS"
+          } > android/key.properties
       - name: Build release APK
         run: gradle -p android assembleRelease --no-daemon
+      - name: Assert APK is not signed with the debug key
+        run: |
+          APK=$(ls android/app/build/outputs/apk/release/*.apk | head -1)
+          python3 scripts/verify_apk_signature.py "$APK"
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:

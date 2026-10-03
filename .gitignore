@@ -15,3 +15,10 @@ Thumbs.db
 qemu-test/images/data.img
 qemu-test/images/NK.bin.load-0x800010c0.raw
 qemu-test/images/NK.zip
+
+# 签名密钥与口令：绝不入仓，只在 CI 由 secrets 注入
+android/key.properties
+android/app/*.jks
+android/app/*.keystore
+*.jks
+*.keystore
