@@ -194,6 +194,16 @@ static DWORD WINAPI ConnThread(LPVOID) {
     int failRounds = 0;   // 连续连接失败轮次（用于退避，成功即清零）
     std::string cfg = readConfig();
     Log("ConnThread start, configIP='%s' port=%d", cfg.c_str(), g_cfgPort);
+    // R14：立刻打第一条候选日志。旧版若 GetCandidates 返回空，会continue 到 Sleep(1000)
+    // 再循环，而唯一能看出"卡在哪"的 round 日志在cands.empty() 分支之后——
+    // 候选一直为空时日志里只有"未发现手机"，看不出网卡/网关枚举是否成功。
+    {
+        std::vector<std::string> probe;
+        NetClient::GetCandidates(cfg, probe);
+        std::string joined;
+        for (size_t i = 0; i < probe.size(); i++) { if (i) joined += ", "; joined += probe[i]; }
+        Log("[stage] first GetCandidates -> %d 个候选 [%s]", (int)probe.size(), joined.c_str());
+    }
 
     while (g_running) {
         bool ok = false;
@@ -416,21 +426,55 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
     Log("WinMain enter");
     Log("build %s %s (R13)", __DATE__, __TIME__);   // R11：启动日志带构建时间，排障先对版本
 
+    // R14：崩溃定位哨兵。实测车机上日志只有启动横幅就断了，说明进程在 WinMain 早期
+    // （窗口创建/消息泵之前）就死了，而那阶段日志全在缓冲区没落盘，什么都看不到。
+    // 下面每一步都强制 flush（log.cpp 在启动 3s 内本就逐条flush），断在哪一步一目了然。
+    Log("[stage] single-instance ok, pid-ish=%u", (unsigned)GetCurrentProcessId());
+
     WNDCLASS wc = {0};
     wc.lpfnWndProc = WndProc;
     wc.hInstance   = hInst;
     wc.lpszClassName = TEXT("TuptupWinCE");
     wc.hbrBackground = NULL;   // 自行铺满整窗（见 WM_ERASEBKGND），不交给系统擦背景，避免多余擦除导致闪烁
     if (!RegisterClass(&wc)) { Log("RegisterClass failed"); return 1; }
+    Log("[stage] RegisterClass ok");
 
     // R11：窗口铺满物理屏（不再写死 800x480）。800x480 车机行为与旧版一致（客户区=屏高-标题栏）；
     // 更大分辨率的车机（如 1024x600）也能自动铺满，握手上报真实客户区，手机按它出图。
     int scrW = GetSystemMetrics(SM_CXSCREEN);
     int scrH = GetSystemMetrics(SM_CYSCREEN);
     if (scrW < 100 || scrH < 100) { scrW = 800; scrH = 480; }  // 度量异常兜底
-    g_hwnd = CreateWindowEx(0, TEXT("TuptupWinCE"), TEXT("tuptup.top 车机投屏 · 等待手机"),
-        WS_VISIBLE | WS_CAPTION | WS_SYSMENU, 0, 0, scrW, scrH, NULL, NULL, hInst, NULL);
-    if (!g_hwnd) { Log("CreateWindowEx failed"); return 1; }
+    Log("[stage] screen metrics %dx%d", scrW, scrH);
+    // R14：全屏窗口创建失败时降级重试。WinCE 车机若正在跑导航/音乐等占内存的程序，
+    //全屏 WS_VISIBLE 窗口可能因内存不足创建失败（实测车机日志在此之前就断了，
+    // 却因缓冲区未落盘而看不到任何线索）。与其直接退出，不如先试小窗，
+    // 仍不行再报错——保证一定能看到带错误码的日志。
+    for (int attempt = 0; attempt < 2 && !g_hwnd; attempt++) {
+        if (attempt == 0) {
+            g_hwnd = CreateWindowEx(0, TEXT("TuptupWinCE"), TEXT("tuptup.top 车机投屏 · 等待手机"),
+                WS_VISIBLE | WS_CAPTION | WS_SYSMENU, 0, 0, scrW, scrH, NULL, NULL, hInst, NULL);
+        } else {
+            Log("[stage] fullscreen window failed (err=%u), retry smaller 640x480",
+                (unsigned)GetLastError());
+            g_hwnd = CreateWindowEx(0, TEXT("TuptupWinCE"), TEXT("tuptup.top 车机投屏 · 等待手机"),
+                WS_VISIBLE | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, 640, 480,
+                NULL, NULL, hInst, NULL);
+        }
+    }
+    if (!g_hwnd) {
+        // R14：把 WinCE 最后一个错误码也记下来。WinCE 上 CreateWindowEx 失败最常见是
+        // 内存不足（车机 RAM 紧张 + 前台导航程序占用）或窗口类注册问题，
+        // 只记 "failed" 完全无法区分。
+        DWORD err = GetLastError();
+        Log("CreateWindowEx failed, GetLastError=%u (%s), screen=%dx%d",
+            (unsigned)err,
+            err == ERROR_NOT_ENOUGH_MEMORY ? "ERROR_NOT_ENOUGH_MEMORY"
+            : err == ERROR_CLASS_DOES_NOT_EXIST ? "ERROR_CLASS_DOES_NOT_EXIST"
+            : err == ERROR_OUTOFMEMORY ? "ERROR_OUTOFMEMORY" : "other",
+            scrW, scrH);
+        return 1;
+    }
+    Log("[stage] CreateWindowEx ok");
     Log("window created");
     RECT crc; GetClientRect(g_hwnd, &crc);
     if (crc.right > 0)  g_cliW = crc.right;

@@ -79,9 +79,16 @@ void Log(const char* fmt, ...) {
 
     DWORD wr = 0;
     WriteFile(g_hLog, line, (DWORD)m, &wr, NULL);
-    // 不再每条都 FlushFileBuffers：它会强制同步落盘，在单核车机上开销显著，
-    // 高频日志会直接拖慢收帧线程；改为最久 2s 刷一次，兼顾断电丢日志的风险。
-    if (now - g_lastFlush > 2000) { FlushFileBuffers(g_hLog); g_lastFlush = now; }
+    // 落盘策略：前若干条（覆盖完整启动流程）+ 状态变化时立即 flush，其余按 2s 兜底。
+    //
+    // 为什么必须有"前 N 条立即 flush"：实测车机日志只有两行启动横幅就断了，
+    // WinMain enter / client area / renderer+net / discovery / ConnThread start
+    // 这些定位崩溃点的关键信息全在缓冲区里没落盘，进程一死就全丢了 ——
+    // 排障时只能看到"啥也没发生"，等于没有日志。
+    // 低开销做法：只在启动关键窗口（g_startTick 起 3s 内）强制刷，
+    // 之后恢复 2s 节流，稳定镜像态的重复日志不会被打扰。
+    DWORD age = now - g_startTick;
+    if (age < 3000 || now - g_lastFlush > 2000) { FlushFileBuffers(g_hLog); g_lastFlush = now; }
 
     LeaveCriticalSection(&g_csLog);
 }
