@@ -74,6 +74,10 @@ bool NetClient::connect(const std::wstring& host, int port) {
         close(); return false;
     }
     m_connectedIP = buf; // 记录命中 IP（配合 device_id 记忆）
+    // R8 兜底：即使握手没解析到 device_id，也把“上次连通过的 IP”记住（id="-" 占位），
+    // 下次启动可直连，不再完全依赖信标/网关发现。
+    static std::string s_lastSavedIP;
+    if (m_connectedIP != s_lastSavedIP) { SaveKnownPhone("-", m_connectedIP); s_lastSavedIP = m_connectedIP; }
     InterlockedIncrement(&g_epoch); // 新连接：作废此前所有后台线程持有的 socket
     return true;
 }
@@ -115,6 +119,9 @@ bool NetClient::connectTimeout(const std::wstring& host, int port, int timeoutMs
         char ipbuf[64] = {0};
         WideCharToMultiByte(CP_ACP, 0, host.c_str(), -1, ipbuf, sizeof(ipbuf), NULL, NULL);
         m_connectedIP = ipbuf;
+        // R8 兜底：无 device_id 也记住“上次连通过的 IP”（同 connect()，去重防频繁写盘）
+        static std::string s_lastSavedIP;
+        if (m_connectedIP != s_lastSavedIP) { SaveKnownPhone("-", m_connectedIP); s_lastSavedIP = m_connectedIP; }
         InterlockedIncrement(&g_epoch); // 新连接：作废此前所有后台线程持有的 socket
         return true;
     }
@@ -341,7 +348,16 @@ static void AddInterfaceGateways() {
                 continue;
             if (a == 0 || a == 127 || d == 0 || d == 255)
                 continue; // 跳过 0.0.0.0 / 回环 / 网络号 / 广播
-            // 网卡未上报网关时，推断本子网 .1 为网关（车机自身 w>1，手机一般为 .1）；同样探测通才加
+            // 兜底1（R8）：USB 共享拓扑下手机规范地址是 .129（Android rndis 网关），不是 .1！
+            // 实测（2026-10-03 SD 日志）：CE 的 GetAdaptersInfo 可能不回报网关，旧兜底只推 .1，
+            // 导致候选全空、`try connect #:8686` 空转。.129 探测补上这个洞。
+            if (d != 129 && probePort(a, b, c, 129, 200)) {
+                char gw[32];
+                snprintf(gw, sizeof(gw), "%u.%u.%u.129", a, b, c);
+                AddPriority(gw);
+                Log("disc: .129(USB共享手机) 命中 %s:%d", gw, PHONE_PORT);
+            }
+            // 兜底2：网卡未上报网关时，推断本子网 .1 为网关（WiFi 热点拓扑手机=.1）；同样探测通才加
             if (!hasGw && d != 1) {
                 char gw[32];
                 snprintf(gw, sizeof(gw), "%u.%u.%u.1", a, b, c);
@@ -415,6 +431,12 @@ static DWORD WINAPI SubnetScanThread(LPVOID) {
                         Log("scan: .1 命中 %s:%d", gw, PHONE_PORT);
                     }
                 }
+                // R8：USB 共享手机=.129（Android 规范），与网关/.1 探测互补，防止候选全空
+                if (d != 129 && probePort(a, b, c, 129, 100)) {
+                    char gw[32]; snprintf(gw, sizeof(gw), "%u.%u.%u.129", a, b, c);
+                    AddPriority(gw);
+                    Log("scan: .129(USB共享手机) 命中 %s:%d", gw, PHONE_PORT);
+                }
             }
         }
 
@@ -477,7 +499,14 @@ static DWORD WINAPI DiscoveryThread(LPVOID) {
                 if (strncmp(buf, "GLOAI|", 6) == 0) {
                     char* ip = buf + 6;
                     char* sep = strchr(ip, '|');
-                    if (sep) { *sep = 0; AddPriority(ip); EnterCriticalSection(&g_csCand); g_beaconIP = ip; LeaveCriticalSection(&g_csCand); }
+                    if (sep) {
+                        *sep = 0; AddPriority(ip);
+                        EnterCriticalSection(&g_csCand);
+                        bool changed = (g_beaconIP != ip);   // R8：信标来源落日志（仅在 IP 变化时记，防刷屏）
+                        g_beaconIP = ip;
+                        LeaveCriticalSection(&g_csCand);
+                        if (changed) Log("disc: beacon 收到手机 IP %s", ip);
+                    }
                 }
             }
         }
@@ -618,8 +647,8 @@ void NetClient::GetCandidates(const std::string& configIP, std::vector<std::stri
     if (!g_beaconIP.empty()) tmp.push_back(g_beaconIP);
     for (size_t i = 0; i < g_priIPs.size(); i++) tmp.push_back(g_priIPs[i]);
     LeaveCriticalSection(&g_csCand);
-    // 保序去重：信标 IP 常与网关推导重复，避免重复尝试同一个地址
+    // 保序去重 + 过滤空串（R8：旧版空候选会打出 `try connect #:8686` 空转、污染日志）
     for (size_t i = 0; i < tmp.size(); i++) {
-        if (!HasIP(out, tmp[i].c_str())) out.push_back(tmp[i]);
+        if (!tmp[i].empty() && !HasIP(out, tmp[i].c_str())) out.push_back(tmp[i]);
     }
 }

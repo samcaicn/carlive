@@ -193,15 +193,25 @@ static DWORD WINAPI ConnThread(LPVOID) {
                 Sleep(1000);
                 continue;
             }
-            // 有高可信候选（信标/网关/.1）：快速逐个连接，几乎秒连，不依赖全段扫描
+            // 有高可信候选（信标/网关/.129/.1）：快速逐个连接，几乎秒连，不依赖全段扫描
+            // R8 日志节流：旧版每 0.5s 一条 try/FAIL 把 256KB 日志 2 分钟刷满，改成每 10s 记一轮
+            static DWORD s_lastCandLog = 0;
+            bool logRound = (GetTickCount() - s_lastCandLog > 10000);
+            if (logRound) {
+                s_lastCandLog = GetTickCount();
+                std::string joined;
+                for (size_t i = 0; i < cands.size(); i++) { if (i) joined += ", "; joined += cands[i]; }
+                Log("round: %d 候选 [%s]", (int)cands.size(), joined.c_str());
+            }
             for (size_t i = 0; i < cands.size() && !ok; i++) {
+                if (cands[i].empty()) continue;  // R8：双保险，空候选直接跳过
                 std::wstring w = L"GLOAI 车机投屏 · 正在连接 ";
                 w += A2W(cands[i].c_str());
                 w += L":8686…";
                 SetStatus(w.c_str());
-                Log("try connect %s:8686", cands[i].c_str());
+                if (logRound) Log("try connect %s:8686", cands[i].c_str());
                 if (g_net->connectTimeout(A2W(cands[i].c_str()), 8686, 1500)) ok = true;
-                else Log("connect FAIL %s:8686 (手机端未监听/未启动App?)", cands[i].c_str());
+                else if (logRound) Log("connect FAIL %s:8686 (手机端未监听/未启动App?)", cands[i].c_str());
             }
             if (!ok) {
                 // 退避：连续失败轮次越多间隔越久（500ms 起步，上限 3s）。手机 App 未启动时，
