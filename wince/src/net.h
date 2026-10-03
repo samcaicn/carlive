@@ -26,6 +26,18 @@ public:
     void sendControl(BYTE code);
     bool sendHeartbeat();
 
+    // 已连手机的稳定标识（握手阶段从手机侧 HANDSHAKE 的 device_id 解析得到），
+    // 用于“记住这台手机”：下次启动优先直连其上次 IP，免等信标。
+    std::string phoneId() const { return m_phoneId; }
+    // 本次连接命中的手机 IP（connect/connectTimeout 成功后记录），与 device_id 配对落盘。
+    void setConnectedIP(const std::string& ip) { m_connectedIP = ip; }
+
+    // ---- 已知手机（记住连接参数）----
+    // known_phones.cfg 落盘与加载：每行 "device_id ip last_ok_ts"。
+    static void LoadKnownPhones();                 // 启动时读取，填充 g_knownIPs（按最近成功倒序）
+    static void SaveKnownPhone(const std::string& id, const std::string& ip); // 连上后写入/更新
+    static void GetKnownIPs(std::vector<std::string>& out); // 已知 IP 列表（最近优先）
+
     // 阻塞读取下一个视频帧（自动跳过非视频消息）。返回 false=断线。
     bool recvVideoFrame(VideoFrame& out);
     void close();
@@ -57,6 +69,8 @@ public:
 private:
     SOCKET m_sock;
     int m_codec;   // 当前视频编解码，默认 MJPEG(1)
+    std::string m_phoneId;     // 对端手机稳定标识（握手解析）
+    std::string m_connectedIP; // 本次命中 IP
     bool sendMsg(BYTE type, const BYTE* payload, int len);
     bool readExact(BYTE* buf, int n);
     bool readMsg(BYTE& type, std::vector<BYTE>& payload); // 读一个完整消息

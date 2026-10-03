@@ -21,6 +21,9 @@
     <!-- 悬浮窗（可选，用于镜像状态提示） -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
+    <!-- 插线/拔线自启：监听 USB 状态变化，无需 App 预先运行 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <application
         android:allowBackup="true"
         android:label="@string/app_name"
@@ -35,6 +38,25 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 透明授权页：缺录屏授权时弹出系统“开始”弹窗（用户点一次） -->
+        <activity
+            android:name=".ConsentActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Transparent"
+            android:excludeFromRecents="true"
+            android:taskAffinity="" />
+
+        <!-- 插线/拔线自启广播接收器：车机 USB 线插入即拉起服务，拔出即停止（日用机轻量） -->
+        <receiver
+            android:name=".UsbPlugReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.USB_STATE" />
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+                <action android:name="android.hardware.usb.action.USB_DEVICE_DETACHED" />
+            </intent-filter>
+        </receiver>
 
         <!-- 录屏前台服务 -->
         <service

@@ -4,4 +4,14 @@
     <style name="AppTheme" parent="Theme.AppCompat.NoActionBar">
         <item name="android:windowFullscreen">false</item>
     </style>
+
+    <!-- 透明授权页：仅承载系统“开始录屏”弹窗，自身不显示任何界面。
+         用平台主题（非 AppCompat），因 ConsentActivity 是普通 Activity。 -->
+    <style name="Theme.Transparent" parent="@android:style/Theme.Translucent.NoTitleBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowIsFloating">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+    </style>
 </resources>

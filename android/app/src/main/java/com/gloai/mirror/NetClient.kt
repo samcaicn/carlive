@@ -69,9 +69,9 @@ class NetClient {
         }
     }
 
-    fun sendHandshakePhone(maxW: Int, maxH: Int) {
-        // 简化：用 JSON 表达本端能力（仅握手一次）
-        val json = """{"role":"phone","proto_ver":1,"caps":{"video_encoders":["h264","mjpeg"],"max_w":$maxW,"max_h":$maxH,"touch":true}}"""
+    fun sendHandshakePhone(maxW: Int, maxH: Int, deviceId: String) {
+        // 简化：用 JSON 表达本端能力（仅握手一次）。device_id 让车机“记住这台手机”。
+        val json = """{"role":"phone","proto_ver":1,"caps":{"video_encoders":["h264","mjpeg"],"max_w":$maxW,"max_h":$maxH,"touch":true},"device_id":"$deviceId"}"""
         writeMessage(Protocol.TYPE_HANDSHAKE, json.toByteArray(Charsets.UTF_8))
     }
 

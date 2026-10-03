@@ -4,6 +4,7 @@
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 #include <cstring>
+#include <ctime>
 
 static const BYTE MAGIC[4] = { 0x47, 0x4C, 0x4F, 0x41 }; // "GLOA"
 
@@ -72,6 +73,7 @@ bool NetClient::connect(const std::wstring& host, int port) {
     if (::connect(m_sock, (SOCKADDR*)&sa, sizeof(sa)) == SOCKET_ERROR) {
         close(); return false;
     }
+    m_connectedIP = buf; // 记录命中 IP（配合 device_id 记忆）
     InterlockedIncrement(&g_epoch); // 新连接：作废此前所有后台线程持有的 socket
     return true;
 }
@@ -109,6 +111,10 @@ bool NetClient::connectTimeout(const std::wstring& host, int port, int timeoutMs
     if (ok) {
         setRecvTimeout(s);
         m_sock = s;
+        // 记录本次命中 IP（与握手解析到的 device_id 配对落盘，实现“记住这台手机”）
+        char ipbuf[64] = {0};
+        WideCharToMultiByte(CP_ACP, 0, host.c_str(), -1, ipbuf, sizeof(ipbuf), NULL, NULL);
+        m_connectedIP = ipbuf;
         InterlockedIncrement(&g_epoch); // 新连接：作废此前所有后台线程持有的 socket
         return true;
     }
@@ -199,12 +205,38 @@ bool NetClient::recvVideoFrame(VideoFrame& out) {
     BYTE type; std::vector<BYTE> payload;
     while (connected()) {
         if (!readMsg(type, payload)) { Log("recvVideoFrame: readMsg failed -> disconnect"); return false; }
-        if (type == 0x03) { // VIDEO_FRAME
+        if (type == 0x01) { // HANDSHAKE：手机侧会带 device_id，解析并“记住这台手机”
+            if (!payload.empty()) {
+                std::string s((const char*)payload.data(), payload.size());
+                const char* p = strstr(s.c_str(), "\"device_id\"");
+                if (p) {
+                    p = strchr(p, ':');
+                    if (p) {
+                        p++;
+                        while (*p == ' ' || *p == '\t') p++;
+                        if (*p == '"') {
+                            p++;
+                            const char* e = strchr(p, '"');
+                            if (e && e > p) {
+                                std::string id(p, (size_t)(e - p));
+                                if (!id.empty()) {
+                                    m_phoneId = id;
+                                    if (!m_connectedIP.empty())
+                                        SaveKnownPhone(id, m_connectedIP);
+                                    Log("handshake: phone device_id=%s ip=%s (remembered)", id.c_str(), m_connectedIP.c_str());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            continue; // 握手不产出视频帧
+        } else if (type == 0x03) { // VIDEO_FRAME
             if (payload.size() < 9) continue;
             out.isKey = (payload[0] != 0);
             out.timestamp = (payload[1]<<24)|(payload[2]<<16)|(payload[3]<<8)|payload[4];
             int dlen = (payload[5]<<24)|(payload[6]<<16)|(payload[7]<<8)|payload[8];
-            if (dlen < 0 || (size_t)dlen > payload.size()-9) continue;
+            if (dlen < 0 || (size_t)dlen > payload.size()-9) continue; // 长度越界：丢弃本消息继续
             // 防御：单帧超过 8MB 视为异常（损坏/恶意流），直接跳过并继续读下一帧，
             // 避免 64MB 级 WinCE 设备为异常帧分配巨量内存导致 OOM。
             if (dlen > MAX_FRAME_BYTES) { Log("recvVideoFrame: 单帧过大 %d 字节，跳过", dlen); continue; }
@@ -457,9 +489,94 @@ static DWORD WINAPI DiscoveryThread(LPVOID) {
 static HANDLE g_hDiscThread = NULL;
 static HANDLE g_hScanThread = NULL;
 
+///////////////////////////////////////////////////////////////////////////////
+// 记住手机（known_phones.cfg）：连上后把 device_id + 上次 IP 落盘，
+// 下次启动优先直连这些 IP，免等 UDP 信标，做到“下次记住这台手机的连接参数”。
+///////////////////////////////////////////////////////////////////////////////
+struct KnownPhone { std::string id; std::string ip; long long ts; };
+static std::vector<KnownPhone> g_knownPhones;  // 按最近成功倒序
+static std::vector<std::string> g_knownIPs;    // 仅 IP，供候选前置
+static CRITICAL_SECTION g_csKnown;
+static bool g_knownInit = false;
+
+static std::wstring knownPhonesPath() {
+    WCHAR path[MAX_PATH] = {0};
+    if (GetModuleFileName(NULL, path, MAX_PATH)) {
+        WCHAR* p = wcsrchr(path, L'\\');
+        if (p) wcscpy(p + 1, L"known_phones.cfg");
+    }
+    return std::wstring(path);
+}
+
+void NetClient::LoadKnownPhones() {
+    if (!g_knownInit) { InitializeCriticalSection(&g_csKnown); g_knownInit = true; }
+    EnterCriticalSection(&g_csKnown);
+    g_knownPhones.clear(); g_knownIPs.clear();
+    HANDLE hf = CreateFile(knownPhonesPath().c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (hf != INVALID_HANDLE_VALUE) {
+        char buf[512] = {0}; DWORD rd = 0; std::string content;
+        while (ReadFile(hf, buf, sizeof(buf) - 1, &rd, NULL) && rd > 0) { buf[rd] = 0; content += buf; }
+        CloseHandle(hf);
+        size_t pos = 0;
+        while (pos < content.size()) {
+            size_t nl = content.find('\n', pos);
+            std::string line = content.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+            pos = (nl == std::string::npos) ? content.size() : nl + 1;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            // 行格式：device_id ip ts
+            char id[128] = {0}, ip[64] = {0}; long long ts = 0;
+            if (sscanf(line.c_str(), "%127s %63s %lld", id, ip, &ts) >= 2) {
+                if (id[0] && ip[0]) {
+                    g_knownPhones.push_back(KnownPhone{id, ip, ts});
+                    if (!HasIP(g_knownIPs, ip)) g_knownIPs.push_back(ip);
+                }
+            }
+        }
+        Log("known_phones: loaded %d", (int)g_knownPhones.size());
+    }
+    LeaveCriticalSection(&g_csKnown);
+}
+
+void NetClient::SaveKnownPhone(const std::string& id, const std::string& ip) {
+    if (id.empty() || ip.empty()) return;
+    if (!g_knownInit) { InitializeCriticalSection(&g_csKnown); g_knownInit = true; }
+    EnterCriticalSection(&g_csKnown);
+    bool found = false;
+    for (size_t i = 0; i < g_knownPhones.size(); i++) {
+        if (g_knownPhones[i].id == id) { g_knownPhones[i].ip = ip; g_knownPhones[i].ts = (long long)time(NULL); found = true; break; }
+    }
+    if (!found) g_knownPhones.push_back(KnownPhone{id, ip, (long long)time(NULL)});
+    // 重排：刚连上的排最前（最近优先）
+    // 写回文件
+    HANDLE hf = CreateFile(knownPhonesPath().c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    if (hf != INVALID_HANDLE_VALUE) {
+        // 按 ts 倒序写
+        std::vector<KnownPhone> sorted = g_knownPhones;
+        for (size_t i = 0; i + 1 < sorted.size(); i++)
+            for (size_t j = i + 1; j < sorted.size(); j++)
+                if (sorted[j].ts > sorted[i].ts) std::swap(sorted[i], sorted[j]);
+        std::string out;
+        for (size_t i = 0; i < sorted.size(); i++)
+            out += sorted[i].id + " " + sorted[i].ip + " " + std::to_string(sorted[i].ts) + "\n";
+        DWORD wr = 0; WriteFile(hf, out.c_str(), (DWORD)out.size(), &wr, NULL);
+        CloseHandle(hf);
+        Log("known_phones: saved %d (id=%s ip=%s)", (int)sorted.size(), id.c_str(), ip.c_str());
+    }
+    LeaveCriticalSection(&g_csKnown);
+}
+
+void NetClient::GetKnownIPs(std::vector<std::string>& out) {
+    out.clear();
+    if (!g_knownInit) return;
+    EnterCriticalSection(&g_csKnown);
+    for (size_t i = 0; i < g_knownIPs.size(); i++) if (!HasIP(out, g_knownIPs[i].c_str())) out.push_back(g_knownIPs[i]);
+    LeaveCriticalSection(&g_csKnown);
+}
+
 void NetClient::StartDiscovery() {
     InitializeCriticalSection(&g_csCand);
     if (g_discoveryOn) return;
+    LoadKnownPhones();   // 启动时读取“记住的手机”，供本轮回合优先直连
     g_discoveryOn = true;
     g_hDiscThread = CreateThread(NULL, 0, DiscoveryThread, NULL, 0, NULL);
     g_hScanThread = CreateThread(NULL, 0, SubnetScanThread, NULL, 0, NULL);
@@ -492,9 +609,11 @@ void NetClient::ClearScanned() {
 
 void NetClient::GetCandidates(const std::string& configIP, std::vector<std::string>& out) {
     out.clear();
-    // 优先级：config.txt 显式覆盖 > UDP 信标真实IP(最高可信) > 接口网关/扫描确认
+    // 优先级：config.txt 显式覆盖 > 【已知手机上次IP(记住这台手机)】 > UDP 信标真实IP(最高可信) > 接口网关/扫描确认
     std::vector<std::string> tmp;
     if (!configIP.empty()) tmp.push_back(configIP);
+    std::vector<std::string> known; GetKnownIPs(known);
+    for (size_t i = 0; i < known.size(); i++) tmp.push_back(known[i]);
     EnterCriticalSection(&g_csCand);
     if (!g_beaconIP.empty()) tmp.push_back(g_beaconIP);
     for (size_t i = 0; i < g_priIPs.size(); i++) tmp.push_back(g_priIPs[i]);

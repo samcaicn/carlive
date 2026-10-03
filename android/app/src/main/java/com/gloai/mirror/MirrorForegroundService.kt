@@ -8,6 +8,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.app.PendingIntent
 import android.content.pm.ServiceInfo
 import android.hardware.usb.UsbManager
 import android.media.projection.MediaProjection
@@ -29,6 +30,11 @@ import android.widget.Toast
  *  - 检测 USB 设备插入，尽量自动开启 USB 网络共享（车机走 USB 直连时手机侧 IP 固定）；
  *  - 车机连上后：设触摸回注回调、互发握手/视频配置、启动 MjpegSender 推流。
  * 全程零手动 IP 输入。
+ *
+ * 触发方式：
+ *  - 用户手动从 MainActivity 点「启动」（首次需授权录屏）；
+ *  - 插车机线时由 UsbPlugReceiver 发 ACTION_USB_START 自动拉起（日常机轻量：不拔线不常驻）；
+ *    若尚缺录屏授权，自动弹/通知引导用户在系统弹窗点一次「开始」（一次性 ADB 固化后无需再进 App）。
  */
 class MirrorForegroundService : Service() {
 
@@ -41,10 +47,13 @@ class MirrorForegroundService : Service() {
     private var usbReceiver: BroadcastReceiver? = null
     // CPU 常驻锁：镜像期间保持 CPU 唤醒，避免系统息屏/省电把采集与发送线程挂起（与电池白名单配合根治后台冻结）。
     private var wakeLock: PowerManager.WakeLock? = null
+    // 是否由“插线”自动拉起：拔线时若为此模式则自动退出，避免在日用机上长期常驻耗电。
+    private var startedByUsb = false
 
     companion object {
         const val ACTION_START = "com.gloai.mirror.START"
         const val ACTION_START_SENDER = "com.gloai.mirror.START_SENDER"
+        const val ACTION_USB_START = "com.gloai.mirror.USB_START"
         const val ACTION_STOP = "com.gloai.mirror.STOP"
 
         /** 录屏授权结果透传：Android 14 必须在已是 mediaProjection 前台服务后获取 MediaProjection */
@@ -81,6 +90,11 @@ class MirrorForegroundService : Service() {
         when (intent?.action) {
             ACTION_STOP -> { stopEverything(); stopSelf(); return START_NOT_STICKY }
             ACTION_START_SENDER -> { startSenderIfReady(); return START_STICKY }
+            ACTION_USB_START -> {
+                // 由 UsbPlugReceiver（插车机线）触发：自动拉起服务。标记由 USB 启动，拔线时自动退出。
+                startedByUsb = true
+                startCore(); return START_STICKY
+            }
             ACTION_START -> {
                 // 录屏授权结果透传给服务：Android 14 必须先以前台服务(mediaProjection 类型)身份运行，
                 // 再 getMediaProjection，否则抛 SecurityException 闪退。故此处仅存参数，真正获取在 startCore。
@@ -151,6 +165,45 @@ class MirrorForegroundService : Service() {
         updateNotification("GLOAI 车机投屏 · 自动发现中")
         // 若授权已就绪且已连上车机，直接起推流
         startSenderIfReady()
+        // 兜底：若尚未获得录屏授权（如插线自动拉起、用户尚未点过“开始”），引导授权。
+        // 日常机策略：不自动点弹窗，而是弹授权页 + 常驻通知，用户点一下系统“开始”即可。
+        requestConsentIfNeeded()
+    }
+
+    /**
+     * 若尚未获得录屏授权，引导用户授权一次：尝试直接弹出授权页（前台服务允许），
+     * 同时把通知改为“点此授权录屏”，用户点通知也能进入。授权完成后由 ConsentActivity 回灌给本服务。
+     * 注意：此处【不】自动点击系统弹窗（用户选择“手动点一次”方案），避免触碰无障碍自动点击。
+     */
+    private fun requestConsentIfNeeded() {
+        if (MirrorState.mediaProjection != null) return
+        MirrorState.consentPending = true
+        // 尝试直接弹授权页（部分 ROM 在后台启动 Activity 受限，失败也不影响下方通知入口）
+        try {
+            startActivity(Intent(this, ConsentActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
+        } catch (_: Exception) { }
+        notifyNeedConsent()
+    }
+
+    /** 把通知替换为“点此授权录屏以开始车机投屏”，点击进入 ConsentActivity。 */
+    private fun notifyNeedConsent() {
+        val pi = PendingIntent.getActivity(
+            this, 2,
+            Intent(this, ConsentActivity::class.java).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) },
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            else PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val n = Notification.Builder(this, CHANNEL)
+            .setContentTitle("GLOAI 车机投屏")
+            .setContentText("点此授权录屏以开始车机投屏")
+            .setSmallIcon(android.R.drawable.ic_menu_camera)
+            .setContentIntent(pi)
+            .setAutoCancel(true)
+            .build()
+        getSystemService(NotificationManager::class.java).notify(1, n)
     }
 
     /** 车机连上：配置回调、握手、视频配置，并视授权情况起推流。 */
@@ -167,7 +220,7 @@ class MirrorForegroundService : Service() {
         }
         net.onLog = { m -> Log.d("GLOAI", m) }
 
-        net.sendHandshakePhone(maxW = 800, maxH = 480)
+        net.sendHandshakePhone(maxW = 800, maxH = 480, deviceId = MirrorState.loadDeviceId(this))
         // V1 车机端只解码 MJPEG（微型 JPEG 解码器），手机默认走 MJPEG 以端到端可解。
         net.sendVideoConfig(Protocol.CODEC_MJPEG, 800, 480, 15, 2_000_000)
         updateNotification("GLOAI 车机投屏 · 已连接，镜像中")
@@ -205,11 +258,26 @@ class MirrorForegroundService : Service() {
                         intent.getBooleanExtra("connected", false)
                     else -> false
                 }
+                val disconnected = when (action) {
+                    UsbManager.ACTION_USB_DEVICE_DETACHED -> true
+                    "android.intent.action.USB_STATE" ->
+                        !intent.getBooleanExtra("connected", true)
+                    else -> false
+                }
                 if (connected) {
                     Log.i(TAG, "USB device attached -> enable tethering")
                     enableUsbTethering()
                     Toast.makeText(this@MirrorForegroundService,
                         "USB 已连接：已尝试自动开启网络共享", Toast.LENGTH_SHORT).show()
+                } else if (disconnected) {
+                    Log.i(TAG, "USB disconnected")
+                    if (startedByUsb) {
+                        // 日用机轻量策略：由插线自动拉起的服务，拔线即退出，避免长期常驻耗电。
+                        Toast.makeText(this@MirrorForegroundService,
+                            "USB 已断开：停止车机投屏", Toast.LENGTH_SHORT).show()
+                        stopEverything()
+                        stopSelf()
+                    }
                 }
             }
         }

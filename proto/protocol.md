@@ -72,12 +72,14 @@ PAYLOAD（JSON，UTF-8，便于扩展；体积很小，仅握手一次）：
     "video_decoders": ["h264", "mjpeg"],   // 车机填写自身能解的格式
     "max_w": 800, "max_h": 480,            // 车机屏分辨率
     "touch": true
-  }
+  },
+  "device_id": "xxxxxxxx-xxxx-xxxx-..."     // 手机侧稳定标识（仅手机→车机携带）；车机据此“记住这台手机”
 }
 ```
 
 - 车机作为 **TCP 客户端**主动连接手机（**TCP 服务端**，监听 `8686`）；连接建立后双方各发一个 HANDSHAKE；
 - 手机根据车机 `video_decoders` 选择编码格式（V1 车机仅声明 `mjpeg`，故默认 MJPEG）；
+- **`device_id`**：手机端在首次运行时生成并持久化（SharedPreferences）的 UUID，每次握手都带上。车机收到后把 `{device_id, 手机IP, 时间戳}` 写入同目录 `known_phones.cfg`；下次启动时，**已知手机的 IP 排在候选列表最前、短超时直连**，无需等待 UDP 信标，实现“记住这台手机、下次秒连”。
 - 握手失败（proto_ver 不匹配 / 无可解格式）则关闭连接。
 
 ---
