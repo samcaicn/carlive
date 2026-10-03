@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# 假车机：直连手机 GLOAI App，验证 协议握手/视频配置/收帧 全链路
+# 假车机：直连手机 tuptup.top App，验证 协议握手/视频配置/收帧 全链路
 import socket, struct, json, sys, time
 
 HOST = sys.argv[1] if len(sys.argv) > 1 else "192.168.10.5"
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8686
-MAGIC = b"GLOA"  # 0x47 0x4C 0x4F 0x41
+MAGIC = b"TUPT"  # 0x54 0x55 0x50 0x54
 
 def msg(t, payload=b""):
     return MAGIC + bytes([t]) + struct.pack(">I", len(payload)) + payload

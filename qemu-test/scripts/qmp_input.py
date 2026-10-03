@@ -86,8 +86,9 @@ class Qmp:
             self.btn(True); time.sleep(0.05); self.btn(False); time.sleep(0.08)
 
     def key(self, qcode):
-        for ev in (True, False):
-            self.events([{"type": "key", "data": {"down": ev, "key": {"type": "qcode", "data": qcode}}}])
+        self.events([{"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": qcode}}}])
+        time.sleep(0.04)  # TCG 软模拟下 down/up 背靠背会丢键，中间加延时
+        self.events([{"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": qcode}}}])
 
 
 def main():
@@ -139,7 +140,7 @@ def main():
             for ch in txt:
                 qc = QCODE.get(ch)
                 if qc:
-                    q.key(qc); time.sleep(0.03)
+                    q.key(qc); time.sleep(0.12)  # 逐字放慢，防软模拟丢键
             print("  text %r" % txt)
         elif op == "wait":
             time.sleep(float(parts[1]))

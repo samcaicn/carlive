@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# GLOAI 车机投屏 · 一次性 ADB 固化脚本（日常机版）
+# tuptup.top 车机投屏 · 一次性 ADB 固化脚本（日常机版）
 #
-# 用途：在手机上“打开一次开发者模式”，把 GLOAI 投屏 App 的配置一次性固化好，
+# 用途：在手机上“打开一次开发者模式”，把 tuptup.top 投屏 App 的配置一次性固化好，
 #       之后插上 car 机线即可自动投屏，无需再进 App。
 #
 # 前置：
 #   1. 手机已开启「开发者选项 → USB 调试」（首次连电脑会弹“允许调试”，勾选一律允许）。
 #   2. 电脑已安装 adb，且手机通过 USB 连到本机。
-#   3. 手机已安装 GLOAI 投屏 App（见 CI 产物 gloai-mirror-android-apk）。
+#   3. 手机已安装 tuptup.top 投屏 App（见 CI 产物 tuptup-mirror-android-apk）。
 #
 # 运行：
 #   adb devices            # 确认手机已列出（authorized）
@@ -21,7 +21,7 @@
 
 set -u
 
-PKG="com.gloai.mirror"
+PKG="top.tuptup.mirror"
 A11Y="$PKG/.MirrorAccessibilityService"
 
 echo "==> 检查 adb 与设备"
@@ -55,7 +55,7 @@ adb shell settings put secure accessibility_enabled 1 || true
 
 echo ""
 echo "==> 完成。建议随后在手机上手动确认："
-echo "   - 设置 → 已安装应用 → GLOAI 车机投屏 → 无障碍：应显示“已开启”"
+echo "   - 设置 → 已安装应用 → tuptup.top 车机投屏 → 无障碍：应显示“已开启”"
 echo "   - 设置 → 电池/应用启动管理：允许后台运行（部分国产 ROM 仍需手动放开自启动/后台)"
 echo ""
 echo "剩余唯一手动步骤：手机重启后，插上 car 机线，在手机弹出的系统“开始录屏”对话框点一次「开始」。"

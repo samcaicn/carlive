@@ -1,4 +1,4 @@
-# GLOAI · WinCE 车机投屏镜像
+# tuptup.top · WinCE 车机投屏镜像
 
 把安卓手机屏幕实时投到 **ARM WinCE 6.0 车机**大屏，并能在车机上触摸点击反向操控手机。
 参考 [scrcpy](https://github.com/Genymobile/scrcpy) 的「采集编码 → 网络 → 解码渲染 → 反向控制」模型，针对 WinCE 适配。
@@ -37,7 +37,7 @@
 
 1. 手机与车机连同一 WiFi（或手机开热点）；
 2. 车机运行 `WinCEClient.exe`（同目录 `config.txt` 填手机 IP:端口）；
-3. 手机打开 GLOAI App，开启无障碍服务，输入车机 IP，开始镜像；
+3. 手机打开 tuptup.top App，开启无障碍服务，输入车机 IP，开始镜像；
 4. 车机显示手机画面，触摸即可操控。
 
 ## 状态

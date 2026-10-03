@@ -5,5 +5,5 @@ pluginManagement {
         gradlePluginPortal()
     }
 }
-rootProject.name = 'GLOAI-Mirror-Android'
+rootProject.name = 'Tuptup-Mirror-Android'
 include ':app'

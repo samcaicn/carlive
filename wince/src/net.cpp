@@ -6,7 +6,7 @@
 #include <cstring>
 #include <ctime>
 
-static const BYTE MAGIC[4] = { 0x47, 0x4C, 0x4F, 0x41 }; // "GLOA"
+static const BYTE MAGIC[4] = { 0x54, 0x55, 0x50, 0x54 }; // "TUPT"
 
 // 发送互斥：主线程(触摸)与心跳线程会并发 send 同一 socket，无锁会导致两条消息字节交错、
 // 对端协议解析错位。所有发送统一走 sendMsg 并在此加锁串行化。
@@ -277,7 +277,7 @@ void NetClient::close() {
 ///////////////////////////////////////////////////////////////////////////////
 // 自动发现（纯探测，不写死任何地址）
 // 三级探测，全部动态：
-//   1) UDP 信标（端口 8687）：手机侧每隔 1s 向广播地址发送 "GLOAI|<ip>|<port>"，
+//   1) UDP 信标（端口 8687）：手机侧每隔 1s 向广播地址发送 "TUPTUP|<ip>|<port>"，
 //      车机监听即可拿到手机【真实】IP——最可靠，无需任何假设。
 //   2) 本机接口网关推导：枚举车机自身网卡，若本端位于某私有子网 x.y.z.w(w>1)，
 //      则手机（网关/服务端）必在该子网，优先取网卡真实网关，否则推断为 x.y.z.1。
@@ -495,9 +495,9 @@ static DWORD WINAPI DiscoveryThread(LPVOID) {
             int n = recvfrom(s, buf, sizeof(buf) - 1, 0, (SOCKADDR*)&from, &fl);
             if (n > 0) {
                 buf[n] = 0;
-                // 格式：GLOAI|<ip>|<port>
-                if (strncmp(buf, "GLOAI|", 6) == 0) {
-                    char* ip = buf + 6;
+                // 格式：TUPTUP|<ip>|<port>
+                if (strncmp(buf, "TUPTUP|", 7) == 0) {
+                    char* ip = buf + 7;
                     char* sep = strchr(ip, '|');
                     if (sep) {
                         *sep = 0; AddPriority(ip);

@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace 'com.gloai.mirror'
+    namespace 'top.tuptup.mirror'
     compileSdk 34
 
     defaultConfig {
-        applicationId "com.gloai.mirror"
+        applicationId "top.tuptup.mirror"
         minSdk 21           // Android 5.0，MediaProjection 起点
         targetSdk 34
         versionCode 2

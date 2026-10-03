@@ -1,5 +1,5 @@
 #pragma once
-// net.h - WinCE 车机端 TCP 客户端 + GLOA 协议解析
+// net.h - WinCE 车机端 TCP 客户端 + TUPT 协议解析
 // 对应 proto/protocol.md。WinCE 使用 Winsock2 (ws2.dll)。
 
 #include <windows.h>

@@ -1,5 +1,5 @@
 // log.cpp - 见 log.h
-// 把启动/连接里程碑与错误写入 EXE 同目录 gloai.log，便于在车机 SD 卡上排查“启动卡死”等问题。
+// 把启动/连接里程碑与错误写入 EXE 同目录 tuptup.log，便于在车机 SD 卡上排查“启动卡死”等问题。
 #include "log.h"
 #include <stdarg.h>
 #include <string.h>
@@ -26,8 +26,8 @@ void LogInit() {
     WCHAR path[MAX_PATH] = {0};
     if (GetModuleFileName(NULL, path, MAX_PATH)) {
         WCHAR* p = wcsrchr(path, L'\\');
-        if (p) wcscpy(p + 1, L"gloai.log");
-        // 日志滚动：SD 卡空间有限，超过 256KB 时把旧日志改名为 gloai.log.bak（仅保留一份备份），避免无限增长。
+        if (p) wcscpy(p + 1, L"tuptup.log");
+        // 日志滚动：SD 卡空间有限，超过 256KB 时把旧日志改名为 tuptup.log.bak（仅保留一份备份），避免无限增长。
         HANDLE hSize = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
         if (hSize != INVALID_HANDLE_VALUE) {
             DWORD sz = GetFileSize(hSize, NULL);
@@ -44,7 +44,7 @@ void LogInit() {
             SetFilePointer(g_hLog, 0, NULL, FILE_END); // 追加
         }
     }
-    Log("==== GLOAI start (t=0) ====");
+    Log("==== tuptup.top start (t=0) ====");
 }
 
 void Log(const char* fmt, ...) {

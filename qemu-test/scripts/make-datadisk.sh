@@ -29,12 +29,12 @@ docker run --rm --entrypoint sh \
   -v "$SRC_ABS":/src:ro -v "$(dirname "$OUT_ABS")":/out \
   "$IMG" -c "dd if=/dev/zero of=/out/$(basename "$OUT_ABS") bs=1M count=$MB 2>/dev/null; echo '[*] 空镜像已建'"
 
-# 2) 写 MBR
+# 2) 写 MBR（mkmbr.py 与本脚本同目录；脚本开头已 cd 到本目录）
 PY=/Users/k/.workbuddy/binaries/python/versions/3.13.12/bin/python3
 if [ -x "$PY" ]; then
-  "$PY" tools/mkmbr.py "$OUT_ABS" 2048
+  "$PY" ./mkmbr.py "$OUT_ABS" 2048
 else
-  python3 tools/mkmbr.py "$OUT_ABS" 2048
+  python3 ./mkmbr.py "$OUT_ABS" 2048
 fi
 
 # 3) 格式化 + 拷贝

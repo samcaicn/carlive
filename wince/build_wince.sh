@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# 用 enlyze CeGCC（arm-mingw32ce，GCC 9.3）交叉编译 GLOAI 车机端为 ARM WinCE 可执行文件。
+# 用 enlyze CeGCC（arm-mingw32ce，GCC 9.3）交叉编译 tuptup.top 车机端为 ARM WinCE 可执行文件。
 # 依赖：ghcr.io/enlyze/windows-ce-build-environment-arm 容器（已含工具链与 WinCE 头/库）。
-# 产物 GLOAI.exe 为自包含二进制（静态链接 libgcc/libstdc++），可直接拷到车机 SD 卡运行。
+# 产物 tuptup.exe 为自包含二进制（静态链接 libgcc/libstdc++），可直接拷到车机 SD 卡运行。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -14,7 +14,7 @@ echo ">> CWD = $SCRIPT_DIR"
 echo ">> CC  = $CC"
 ls -la src || true
 
-OUT="$SCRIPT_DIR/GLOAI.exe"
+OUT="$SCRIPT_DIR/tuptup.exe"
 echo ">> building $OUT"
 "$CC" -O2 -Wall -Wno-unused-function \
   "$SCRIPT_DIR/src/main.cpp" \

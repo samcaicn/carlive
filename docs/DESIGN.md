@@ -1,4 +1,4 @@
-# GLOAI · WinCE 车机投屏镜像 —— 架构设计
+# tuptup.top · WinCE 车机投屏镜像 —— 架构设计
 
 > 参考 [scrcpy](https://github.com/Genymobile/scrcpy) 的「设备端采集编码 + 主机端解码渲染 + 反向控制」模型，针对 **ARM WinCE 6.0 车机** 做工程化适配。
 > 目标：把安卓手机屏幕实时投到车机大屏，并能在车机上触摸点击反向操控手机。

@@ -1,4 +1,4 @@
-name: Build GLOAI Mirror
+name: Build tuptup.top Mirror
 
 on:
   push:
@@ -42,7 +42,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gloai-mirror-android-apk
+          name: tuptup-mirror-android-apk
           path: android/app/build/outputs/apk/release/*.apk
 
   wince-build:
@@ -52,7 +52,7 @@ jobs:
       image: ghcr.io/enlyze/windows-ce-build-environment-arm
     steps:
       - uses: actions/checkout@v4
-      - name: Build GLOAI.exe with CeGCC (arm-mingw32ce, GCC 9.3)
+      - name: Build tuptup.exe with CeGCC (arm-mingw32ce, GCC 9.3)
         run: |
           cd wince
           chmod +x build_wince.sh
@@ -60,23 +60,23 @@ jobs:
       - name: Verify PE is ARM WinCE
         run: |
           OD=/opt/cegcc-arm/bin/arm-mingw32ce-objdump
-          "$OD" -f wince/GLOAI.exe | grep -qi "architecture: arm" || { echo "ERROR: not ARM architecture"; exit 1; }
+          "$OD" -f wince/tuptup.exe | grep -qi "architecture: arm" || { echo "ERROR: not ARM architecture"; exit 1; }
           echo "ARM architecture: OK"
           # 解析 PE 头：machine 在 pe+4，subsystem 在 pe+24+68（Windows CE = 9）
           if command -v od >/dev/null 2>&1; then
-            pe=$(od -An -tu4 -j60 -N4 wince/GLOAI.exe | tr -d ' ')
-            subs=$(od -An -tu2 -j$((pe + 92)) -N2 wince/GLOAI.exe | tr -d ' ')
+            pe=$(od -An -tu4 -j60 -N4 wince/tuptup.exe | tr -d ' ')
+            subs=$(od -An -tu2 -j$((pe + 92)) -N2 wince/tuptup.exe | tr -d ' ')
             echo "subsystem=$subs (9 = Windows CE GUI)"
             [ "$subs" = "9" ] || { echo "ERROR: subsystem is not 9 (Windows CE)"; exit 1; }
           else
-            echo "od 不可用，仅做软性检查："; "$OD" -p wince/GLOAI.exe | grep -i subsystem || true
+            echo "od 不可用，仅做软性检查："; "$OD" -p wince/tuptup.exe | grep -i subsystem || true
           fi
           echo "OK: ARM Windows CE PE produced"
       - name: Upload WinCE exe
         uses: actions/upload-artifact@v4
         with:
-          name: gloai-wince-exe
-          path: wince/GLOAI.exe
+          name: tuptup-wince-exe
+          path: wince/tuptup.exe
 
   source-check:
     name: Source sanity check

@@ -1,4 +1,4 @@
-// main.cpp - GLOAI 车机端入口（ARM WinCE 6.0）
+// main.cpp - tuptup.top 车机端入口（ARM WinCE 6.0）
 // 关键修复：主(GUI)线程**永远**跑消息泵（GetMessage），窗口才能正常绘制/响应；
 // 网络发现/连接/收帧/心跳全部在后台线程，避免“启动卡死”（窗口创建后无消息循环→不刷新、点不动）。
 // 零配置：手机 App 启动后 UDP 广播自身 IP，本端监听自动连接；USB 共享网络下通过
@@ -38,7 +38,7 @@ static std::wstring A2W(const char* s) {
     return w;
 }
 
-static wchar_t g_statusText[128] = L"GLOAI 车机投屏 · 等待手机";
+static wchar_t g_statusText[128] = L"tuptup.top 车机投屏 · 等待手机";
 static CRITICAL_SECTION g_csStatus;   // 保护 g_statusText：连接线程写、GUI 线程读，避免读到撕裂文本
 static volatile bool g_hasFrame = false;
 // resetFrame=true（默认）：非镜像态(连接中/断开/扫描)应清帧改显示文字；
@@ -202,7 +202,7 @@ static DWORD WINAPI ConnThread(LPVOID) {
             NetClient::GetCandidates(cfg, cands);
             if (cands.empty()) {
                 // 还没有任何候选：后台轻量扫描在跑，提示“正在扫描”但不要卡住 UI/系统
-                SetStatus(TEXT("GLOAI 车机投屏 · 未发现手机，正在扫描网络…\r\n请在手机打开 GLOAI App 并点「启动投屏服务」+允许录屏"));
+                SetStatus(TEXT("tuptup.top 车机投屏 · 未发现手机，正在扫描网络…\r\n请在手机打开 tuptup.top App 并点「启动投屏服务」+允许录屏"));
                 Sleep(1000);
                 continue;
             }
@@ -218,7 +218,7 @@ static DWORD WINAPI ConnThread(LPVOID) {
             }
             for (size_t i = 0; i < cands.size() && !ok; i++) {
                 if (cands[i].empty()) continue;  // R8：双保险，空候选直接跳过
-                std::wstring w = L"GLOAI 车机投屏 · 正在连接 ";
+                std::wstring w = L"tuptup.top 车机投屏 · 正在连接 ";
                 w += A2W(cands[i].c_str());
                 w += L":";
                 w += std::to_wstring(g_cfgPort);
@@ -247,26 +247,26 @@ static DWORD WINAPI ConnThread(LPVOID) {
         g_net->sendHandshakeHeadunit(g_cliW, g_cliH);   // 上报真实客户区而非名义的 800x480
         NetClient::SetLinkUp(true);   // 通知探测线程：已连上，暂停主动扫描
         NetClient::ClearScanned();    // 清掉已采纳之外的旧候选，避免重连时白等失效 IP
-        SetStatus(TEXT("GLOAI 车机投屏 · 已连接，等待手机画面…"));
+        SetStatus(TEXT("tuptup.top 车机投屏 · 已连接，等待手机画面…"));
         Log("connected -> handshake sent, spawning recv/heartbeat");
 
         HANDLE hRecv = CreateThread(NULL, 0, RecvThread, NULL, 0, NULL);
         HANDLE hHb   = CreateThread(NULL, 0, HeartbeatThread, NULL, 0, NULL);
 
         // 等待断线（对端关闭 或 心跳连续失败）。连上后若 6s 内未收到任何视频帧，
-        // 明确提示“手机未发送画面”（多为 GLOAI App 未授权录屏/未在前台），避免用户
+        // 明确提示“手机未发送画面”（多为 tuptup.top App 未授权录屏/未在前台），避免用户
         // 误以为已镜像却黑屏、无从排障。
         DWORD t0 = GetTickCount();
         bool shownMirroring = false;
         while (g_running && g_net->connected() && g_linkAlive) {
             if (!shownMirroring) {
                 if (g_hasFrame) {
-                    SetStatus(TEXT("GLOAI 车机投屏 · 已连接，镜像中"), false); // 稳定镜像态：保留画面，不闪文字
+                    SetStatus(TEXT("tuptup.top 车机投屏 · 已连接，镜像中"), false); // 稳定镜像态：保留画面，不闪文字
                     shownMirroring = true;
                 } else if (GetTickCount() - t0 > 10000) {
                     // 措辞中性：手机从点启动到真正出帧（授权弹窗+MediaProjection 初始化）可能 >6s，
                     // 不宜武断判定“未发送画面”，仅作信息性提示。
-                    SetStatus(TEXT("GLOAI 车机投屏 · 已连接，正在等待手机画面…\r\n（若长时间黑屏，请确认手机 GLOAI App 已允许录屏并在前台运行）"));
+                    SetStatus(TEXT("tuptup.top 车机投屏 · 已连接，正在等待手机画面…\r\n（若长时间黑屏，请确认手机 tuptup.top App 已允许录屏并在前台运行）"));
                     shownMirroring = true;
                 }
             }
@@ -283,7 +283,7 @@ static DWORD WINAPI ConnThread(LPVOID) {
         if (hRecv) { WaitForSingleObject(hRecv, 4000); CloseHandle(hRecv); hRecv = NULL; }
         if (hHb)   { WaitForSingleObject(hHb,   4000); CloseHandle(hHb);   hHb = NULL; }
         if (g_renderer) g_renderer->resetContentRect(); // 断开后清空内容区，避免重连间隙用上一台手机的宽高比映射触摸
-        SetStatus(TEXT("GLOAI 车机投屏 · 连接断开，重新发现…"));
+        SetStatus(TEXT("tuptup.top 车机投屏 · 连接断开，重新发现…"));
         Sleep(500);
     }
     Log("ConnThread exit");
@@ -406,7 +406,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
     LogInit();
     // R10：单实例保护。双开会让两份 ConnThread 同时连手机、触摸双发、信标端口/日志互踩。
-    HANDLE hSingle = CreateMutex(NULL, TRUE, TEXT("GLOAI_Mirror_SingleInstance"));
+    HANDLE hSingle = CreateMutex(NULL, TRUE, TEXT("Tuptup_Mirror_SingleInstance"));
     if (!hSingle || GetLastError() == ERROR_ALREADY_EXISTS) {
         Log("already running -> exit (single instance guard)");
         if (hSingle) CloseHandle(hSingle);
@@ -419,7 +419,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
     WNDCLASS wc = {0};
     wc.lpfnWndProc = WndProc;
     wc.hInstance   = hInst;
-    wc.lpszClassName = TEXT("GLOAIWinCE");
+    wc.lpszClassName = TEXT("TuptupWinCE");
     wc.hbrBackground = NULL;   // 自行铺满整窗（见 WM_ERASEBKGND），不交给系统擦背景，避免多余擦除导致闪烁
     if (!RegisterClass(&wc)) { Log("RegisterClass failed"); return 1; }
 
@@ -428,7 +428,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
     int scrW = GetSystemMetrics(SM_CXSCREEN);
     int scrH = GetSystemMetrics(SM_CYSCREEN);
     if (scrW < 100 || scrH < 100) { scrW = 800; scrH = 480; }  // 度量异常兜底
-    g_hwnd = CreateWindowEx(0, TEXT("GLOAIWinCE"), TEXT("GLOAI 车机投屏 · 等待手机"),
+    g_hwnd = CreateWindowEx(0, TEXT("TuptupWinCE"), TEXT("tuptup.top 车机投屏 · 等待手机"),
         WS_VISIBLE | WS_CAPTION | WS_SYSMENU, 0, 0, scrW, scrH, NULL, NULL, hInst, NULL);
     if (!g_hwnd) { Log("CreateWindowEx failed"); return 1; }
     Log("window created");
@@ -467,6 +467,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
     if (g_net) { g_net->close(); delete g_net; g_net = NULL; }
     if (g_renderer) { delete g_renderer; g_renderer = NULL; }
     DeleteCriticalSection(&g_csStatus);
-    Log("==== GLOAI exit ====");
+    Log("==== tuptup.top exit ====");
     return 0;
 }

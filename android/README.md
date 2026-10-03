@@ -1,4 +1,4 @@
-# GLOAI 车机投屏 · 安卓发送端
+# tuptup.top 车机投屏 · 安卓发送端
 
 把安卓手机屏幕通过 **WiFi TCP** 实时投到 WinCE 车机，并支持车机端触摸反向操控手机（参考 scrcpy 架构）。
 
@@ -17,7 +17,7 @@ gradle assembleRelease               # 产物 app/build/outputs/apk/release/app-
 ## 安装与权限
 
 1. `adb install app-release.apk`；
-2. 打开 App，在系统「设置 → 无障碍」中开启 **GLOAI 车机投屏**（触摸回注必需，无需 root）；
+2. 打开 App，在系统「设置 → 无障碍」中开启 **tuptup.top 车机投屏**（触摸回注必需，无需 root）；
 3. 首次「开始镜像」会弹 **屏幕录制授权**，允许即可（MediaProjection）。
 
 ## 使用
