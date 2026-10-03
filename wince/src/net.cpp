@@ -376,6 +376,10 @@ static bool probePort(unsigned a, unsigned b, unsigned c, unsigned d, int timeou
     SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET) return false;
     setNoDelay(s);
+    // R15：探测会高频新建/关闭 socket，USB 共享拓扑下一旦触发全段扫描，短时间内成百上千个
+    // 半开连接进入 TIME_WAIT；WinCE 默认本地端口池很小，耗尽后新 socket() 直接失败，
+    // 导致扫描“看起来在跑却永远发现不了手机”。允许地址复用，避免这一隐形失败路径。
+    int reuse = 1; setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
     u_long mode = 1; ioctlsocket(s, FIONBIO, &mode);
     sockaddr_in sa; memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
@@ -536,6 +540,7 @@ static std::wstring knownPhonesPath() {
     if (GetModuleFileName(NULL, path, MAX_PATH)) {
         WCHAR* p = wcsrchr(path, L'\\');
         if (p) wcscpy(p + 1, L"known_phones.cfg");
+        else wcscpy(path, L"known_phones.cfg");   // R15：exe 在根目录（路径无 \）时回退到当前目录文件名
     }
     return std::wstring(path);
 }
@@ -586,20 +591,41 @@ void NetClient::SaveKnownPhone(const std::string& id, const std::string& ip) {
         g_knownPhones.erase(g_knownPhones.begin() + oldest);
     }
     // 重排：刚连上的排最前（最近优先）
-    // 写回文件
-    HANDLE hf = CreateFile(knownPhonesPath().c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    // R15：原子写。先写临时文件，确认整段写入并刷盘后再覆盖正式文件，
+    // 避免 SD 卡满/写保护时 WriteFile 静默失败却已用 CREATE_ALWAYS 截断原文件，导致下次加载读到空。
+    std::wstring mainPath = knownPhonesPath();
+    WCHAR tmpPath[MAX_PATH] = {0};
+    wcsncpy(tmpPath, mainPath.c_str(), MAX_PATH - 1);
+    wcscat(tmpPath, L".tmp");
+    std::vector<KnownPhone> sorted = g_knownPhones;
+    for (size_t i = 0; i + 1 < sorted.size(); i++)
+        for (size_t j = i + 1; j < sorted.size(); j++)
+            if (sorted[j].ts > sorted[i].ts) std::swap(sorted[i], sorted[j]);
+    std::string out;
+    for (size_t i = 0; i < sorted.size(); i++)
+        out += sorted[i].id + " " + sorted[i].ip + " " + std::to_string(sorted[i].ts) + "\n";
+    bool written = false;
+    HANDLE hf = CreateFile(tmpPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
     if (hf != INVALID_HANDLE_VALUE) {
-        // 按 ts 倒序写
-        std::vector<KnownPhone> sorted = g_knownPhones;
-        for (size_t i = 0; i + 1 < sorted.size(); i++)
-            for (size_t j = i + 1; j < sorted.size(); j++)
-                if (sorted[j].ts > sorted[i].ts) std::swap(sorted[i], sorted[j]);
-        std::string out;
-        for (size_t i = 0; i < sorted.size(); i++)
-            out += sorted[i].id + " " + sorted[i].ip + " " + std::to_string(sorted[i].ts) + "\n";
-        DWORD wr = 0; WriteFile(hf, out.c_str(), (DWORD)out.size(), &wr, NULL);
+        DWORD wr = 0;
+        if (WriteFile(hf, out.c_str(), (DWORD)out.size(), &wr, NULL)
+            && wr == (DWORD)out.size()
+            && FlushFileBuffers(hf)) {
+            written = true;
+        }
         CloseHandle(hf);
-        Log("known_phones: saved %d (id=%s ip=%s)", (int)sorted.size(), id.c_str(), ip.c_str());
+    }
+    if (written) {
+        DeleteFile(mainPath.c_str());
+        if (MoveFile(tmpPath, mainPath.c_str())) {
+            Log("known_phones: saved %d (id=%s ip=%s)", (int)sorted.size(), id.c_str(), ip.c_str());
+        } else {
+            Log("known_phones: 临时文件写入成功但 rename 失败 (err=%u)", (unsigned)GetLastError());
+            DeleteFile(tmpPath);
+        }
+    } else {
+        Log("known_phones: 写入失败 (SD卡满/写保护?)，放弃保存以免破坏已有记录");
+        DeleteFile(tmpPath);
     }
     LeaveCriticalSection(&g_csKnown);
 }

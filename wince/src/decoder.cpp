@@ -6,6 +6,7 @@
 // H264 解码（ffmpegce）为明确延后的可选路径，本版不实装（见 decodeH264 占位）。
 
 #include "decoder.h"
+#include "log.h"
 
 // 微型 JPEG 解码器源文件（已 vendor 到 src/nanojpeg.c，MIT 许可）。
 #include "nanojpeg.c"
@@ -26,6 +27,14 @@ bool Decoder::decodeMJPEG(const BYTE* data, int len,
     int iw = njGetWidth();
     int ih = njGetHeight();
     if (iw <= 0 || ih <= 0) { njDone(); return false; }  // 防御：解码成功但产出 0 尺寸（损坏流）
+    // R15：单帧像素总量上限保护。手机端若发来异常/超大 JPEG（损坏的尺寸字段或误发的原图），
+    // nanojpeg 内部 + 下方 rgb.resize(iw*ih*4) 会在 64MB 级 WinCE 上一次性申请数十 MB 连续内存，
+    // 直接触发 OOM 进程崩溃（且无声、无日志）。车机客户端区仅 800x480，手机原图通常 <=1080x1920≈2M 像素；
+    // 这里取 8M 像素（≈32MB RGB32）余量足够，超出直接丢弃本帧，绝不为一帧赌上整机稳定性。
+    if ((long long)iw * (long long)ih > 8000000LL) {
+        Log("decodeMJPEG: 单帧 %dx%d 超像素上限(8M)，丢弃防OOM", iw, ih);
+        njDone(); return false;
+    }
     const unsigned char* src = njGetImage();
     if (!src) { njDone(); return false; }
     int ncomp = (njGetImageSize() / (iw * ih)); // 1(灰度) / 3(RGB) / 4(RGBA，极少见)

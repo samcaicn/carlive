@@ -103,10 +103,11 @@ static int g_cfgPort = 8686;
 static std::string readConfig() {
     std::string ip;
     WCHAR path[MAX_PATH] = {0};
-    if (GetModuleFileName(NULL, path, MAX_PATH)) {
-        WCHAR* p = wcsrchr(path, L'\\');
-        if (p) wcscpy(p + 1, L"config.txt");
-        HANDLE hf = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        if (GetModuleFileName(NULL, path, MAX_PATH)) {
+            WCHAR* p = wcsrchr(path, L'\\');
+            if (p) wcscpy(p + 1, L"config.txt");
+            else wcscpy(path, L"config.txt");   // R15：exe 在根目录（无 \）时回退到当前目录
+            HANDLE hf = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
         if (hf != INVALID_HANDLE_VALUE) {
             char buf[512] = {0}; DWORD rd = 0;
             std::string content;
@@ -207,15 +208,28 @@ static DWORD WINAPI ConnThread(LPVOID) {
 
     while (g_running) {
         bool ok = false;
+        DWORD emptySince = 0;   // R15：候选连续为空的起始 tick，用于超时给更明确的排障提示
         while (g_running && !ok) {
             std::vector<std::string> cands;
             NetClient::GetCandidates(cfg, cands);
             if (cands.empty()) {
                 // 还没有任何候选：后台轻量扫描在跑，提示“正在扫描”但不要卡住 UI/系统
-                SetStatus(TEXT("tuptup.top 车机投屏 · 未发现手机，正在扫描网络…\r\n请在手机打开 tuptup.top App 并点「启动投屏服务」+允许录屏"));
+                if (emptySince == 0) emptySince = GetTickCount();
+                // R15：连续 30s 仍无任何候选，说明车机根本没发现手机（多为车机未识别 USB 网络共享），
+                // 给出可操作的排障清单，而不是永远停在“正在扫描”。
+                if (GetTickCount() - emptySince > 30000) {
+                    SetStatus(TEXT("tuptup.top · 长时间未发现手机\r\n"
+                        "1.手机已开启「USB网络共享」且车机已识别该网络\r\n"
+                        "2.tuptup.top App 已打开并点「启动投屏服务」\r\n"
+                        "3.WiFi 直连时确认两者在同一局域网\r\n"
+                        "4.ColorOS 等可能杀后台，请保持 App 在前台"));
+                } else {
+                    SetStatus(TEXT("tuptup.top 车机投屏 · 未发现手机，正在扫描网络…\r\n请在手机打开 tuptup.top App 并点「启动投屏服务」+允许录屏"));
+                }
                 Sleep(1000);
                 continue;
             }
+            emptySince = 0;   // 有候选即重置计时
             // 有高可信候选（信标/网关/.129/.1）：快速逐个连接，几乎秒连，不依赖全段扫描
             // R8 日志节流：旧版每 0.5s 一条 try/FAIL 把 256KB 日志 2 分钟刷满，改成每 10s 记一轮
             static DWORD s_lastCandLog = 0;
