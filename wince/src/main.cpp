@@ -45,8 +45,12 @@ static volatile bool g_hasFrame = false;
 // resetFrame=false：进入稳定镜像态时保留当前帧，避免把刚出的画面闪成状态文字。
 static void SetStatus(const wchar_t* s, bool resetFrame = true) {
     EnterCriticalSection(&g_csStatus);
-    wcsncpy(g_statusText, s, 127); g_statusText[127] = 0;
+    // R9：状态未变则整路跳过。“未发现手机”分支每秒被调用一次且文本相同，
+    // 旧版每次都 SetWindowText+InvalidateRect，白耗 GUI 线程并加速标题栏闪烁。
+    bool same = (wcsncmp(g_statusText, s, 127) == 0);
+    if (!same) { wcsncpy(g_statusText, s, 127); g_statusText[127] = 0; }
     LeaveCriticalSection(&g_csStatus);
+    if (same) return;
     if (resetFrame) g_hasFrame = false;
     if (g_hwnd) {
         // 标题栏只吃一行：多行排障提示里的 \r\n 若交给 SetWindowText，WinCE 会显示成方块/乱码
@@ -93,6 +97,9 @@ static bool validIPv4(const char* s) {
 
 // 读取同目录 config.txt 的显式 IP（可选覆盖）。支持：注释行(#开头)、空行、
 // 「host」「host port」「host:port」「host=...」。无有效配置则返回空（纯自动发现）。
+// R10：显式端口透传到 g_cfgPort 生效（旧版解析了 pnum 却弃用，写非标端口无效）；
+//      host 行非法不再 break（旧版一行笔误会废掉后面所有行）。
+static int g_cfgPort = 8686;
 static std::string readConfig() {
     std::string ip;
     WCHAR path[MAX_PATH] = {0};
@@ -118,13 +125,15 @@ static std::string readConfig() {
                 if (line[s] == '#') continue;           // 注释行
                 std::string body = line.substr(s);
                 char h[64]; int pnum = 0;
-                // 非法的 host 一律忽略（否则会作为首位候选，每次重连都先超时一轮）
                 if (sscanf(body.c_str(), "host=%63s", h) == 1) {
+                    // 非法的 host 忽略并继续读下一行（R10：不再 break，避免一行笔误废掉全部配置）
                     if (validIPv4(h)) ip = h;
-                    break;
+                    continue;
                 }
-                if (sscanf(body.c_str(), "%63[^: ]%*[: ]%d", h, &pnum) >= 1) {
-                    if (validIPv4(h)) ip = h;
+                int n = sscanf(body.c_str(), "%63[^: \t]%*[: \t]%d", h, &pnum);
+                if (n >= 1 && validIPv4(h)) {
+                    if (n >= 2 && pnum > 1024 && pnum < 65536) g_cfgPort = pnum;  // R10：端口生效
+                    ip = h;
                     break;
                 }
             }
@@ -164,6 +173,10 @@ static DWORD WINAPI RecvThread(LPVOID) {
 static DWORD WINAPI HeartbeatThread(LPVOID) {
     const long myEpoch = NetClient::ConnEpoch();
     while (g_running && g_net && g_net->connected() && NetClient::ConnEpoch() == myEpoch) {
+        // R11：投屏前台运行时周期性重置系统空闲计时器，防止车机因“无操作”息屏/挂起——
+        // 系统一挂起 socket 被冻结，恢复后必断链重连。仅在【已连接且前台激活】时重置，
+        // 不改变未投屏时的正常息屏策略（后台挂起时仍收包维链，但不阻止息屏）。
+        if (g_active) SystemIdleTimerReset();
         bool ok = g_net->sendHeartbeat();
         if (!ok) {
             if (++g_hbFail >= 2) g_linkAlive = false;
@@ -180,7 +193,7 @@ static DWORD WINAPI HeartbeatThread(LPVOID) {
 static DWORD WINAPI ConnThread(LPVOID) {
     int failRounds = 0;   // 连续连接失败轮次（用于退避，成功即清零）
     std::string cfg = readConfig();
-    Log("ConnThread start, configIP='%s'", cfg.c_str());
+    Log("ConnThread start, configIP='%s' port=%d", cfg.c_str(), g_cfgPort);
 
     while (g_running) {
         bool ok = false;
@@ -207,22 +220,28 @@ static DWORD WINAPI ConnThread(LPVOID) {
                 if (cands[i].empty()) continue;  // R8：双保险，空候选直接跳过
                 std::wstring w = L"GLOAI 车机投屏 · 正在连接 ";
                 w += A2W(cands[i].c_str());
-                w += L":8686…";
+                w += L":";
+                w += std::to_wstring(g_cfgPort);
+                w += L"…";
                 SetStatus(w.c_str());
-                if (logRound) Log("try connect %s:8686", cands[i].c_str());
-                if (g_net->connectTimeout(A2W(cands[i].c_str()), 8686, 1500)) ok = true;
-                else if (logRound) Log("connect FAIL %s:8686 (手机端未监听/未启动App?)", cands[i].c_str());
+                if (logRound) Log("try connect %s:%d", cands[i].c_str(), g_cfgPort);
+                if (g_net->connectTimeout(A2W(cands[i].c_str()), g_cfgPort, 1500)) ok = true;
+                else if (logRound) Log("connect FAIL %s:%d (手机端未监听/未启动App?)", cands[i].c_str(), g_cfgPort);
             }
             if (!ok) {
                 // 退避：连续失败轮次越多间隔越久（500ms 起步，上限 3s）。手机 App 未启动时，
                 // 原本每 500ms 就把全部候选连一遍，白占单核 CPU 与 USB 网络；成功即清零，不影响正常重连。
                 failRounds++;
+                // R12：连续失败≥3 轮后本轮起忽略 known IP——手机换网络（IP 变了）时，
+                // 失效的 known IP 不再每轮排最前白等 1.5s×N，让信标/网关探测先命中。
+                NetClient::SetDeferKnown(failRounds >= 3);
                 int k = failRounds < 6 ? failRounds : 6;
                 Sleep(500 * k);
             }
         }
         if (!g_running) break;
         failRounds = 0;         // 连接成功：退避清零
+        NetClient::SetDeferKnown(false);   // R12：连上了，known 恢复正常优先级
 
         g_linkAlive = true; g_hbFail = 0;
         g_net->sendHandshakeHeadunit(g_cliW, g_cliH);   // 上报真实客户区而非名义的 800x480
@@ -343,7 +362,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         break;
     case WM_LBUTTONUP: {
-        if (!g_hasFrame) { s_touchDown = false; break; }
+        // R10：即使此刻无帧（断连/切后台中）也照发 UP——松手事件丢失会让手机一直停在
+        // “按住”状态，后续所有触摸全部错乱；比“可能发出一个无意义 UP”严重得多。
         int x = (int)(short)LOWORD(lp);
         int y = (int)(short)HIWORD(lp);
         float nx = 0, ny = 0;
@@ -385,8 +405,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
     LogInit();
+    // R10：单实例保护。双开会让两份 ConnThread 同时连手机、触摸双发、信标端口/日志互踩。
+    HANDLE hSingle = CreateMutex(NULL, TRUE, TEXT("GLOAI_Mirror_SingleInstance"));
+    if (!hSingle || GetLastError() == ERROR_ALREADY_EXISTS) {
+        Log("already running -> exit (single instance guard)");
+        if (hSingle) CloseHandle(hSingle);
+        return 2;
+    }
     InitializeCriticalSection(&g_csStatus);
     Log("WinMain enter");
+    Log("build %s %s (R13)", __DATE__, __TIME__);   // R11：启动日志带构建时间，排障先对版本
 
     WNDCLASS wc = {0};
     wc.lpfnWndProc = WndProc;
@@ -395,8 +423,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
     wc.hbrBackground = NULL;   // 自行铺满整窗（见 WM_ERASEBKGND），不交给系统擦背景，避免多余擦除导致闪烁
     if (!RegisterClass(&wc)) { Log("RegisterClass failed"); return 1; }
 
+    // R11：窗口铺满物理屏（不再写死 800x480）。800x480 车机行为与旧版一致（客户区=屏高-标题栏）；
+    // 更大分辨率的车机（如 1024x600）也能自动铺满，握手上报真实客户区，手机按它出图。
+    int scrW = GetSystemMetrics(SM_CXSCREEN);
+    int scrH = GetSystemMetrics(SM_CYSCREEN);
+    if (scrW < 100 || scrH < 100) { scrW = 800; scrH = 480; }  // 度量异常兜底
     g_hwnd = CreateWindowEx(0, TEXT("GLOAIWinCE"), TEXT("GLOAI 车机投屏 · 等待手机"),
-        WS_VISIBLE | WS_CAPTION | WS_SYSMENU, 0, 0, 800, 480, NULL, NULL, hInst, NULL);
+        WS_VISIBLE | WS_CAPTION | WS_SYSMENU, 0, 0, scrW, scrH, NULL, NULL, hInst, NULL);
     if (!g_hwnd) { Log("CreateWindowEx failed"); return 1; }
     Log("window created");
     RECT crc; GetClientRect(g_hwnd, &crc);

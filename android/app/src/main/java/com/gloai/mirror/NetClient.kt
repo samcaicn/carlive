@@ -24,6 +24,10 @@ class NetClient {
     var onDisconnect: (() -> Unit)? = null
     var onLog: ((String) -> Unit)? = null
 
+    // R13：车机握手解析出的真实客户区 (max_w, max_h)。VirtualDisplay 按它创建后，
+    // 车机端可 1:1 呈现（无 letterbox 拉伸），触摸归一化也最准。未收到前为 null。
+    @Volatile var headunitSize: Pair<Int, Int>? = null
+
     fun connect(host: String, port: Int): Boolean {
         return try {
             attach(Socket(host, port))
@@ -141,6 +145,16 @@ class NetClient {
 
     private fun dispatch(type: Byte, payload: ByteArray) {
         when (type) {
+            Protocol.TYPE_HANDSHAKE -> {
+                // R13：解析车机握手 caps（max_w/max_h），供 VirtualDisplay 按真实车机客户区出图
+                val s = String(payload, Charsets.UTF_8)
+                val w = Regex("\"max_w\"\\s*:\\s*(\\d+)").find(s)?.groupValues?.get(1)?.toIntOrNull()
+                val h = Regex("\"max_h\"\\s*:\\s*(\\d+)").find(s)?.groupValues?.get(1)?.toIntOrNull()
+                if (w != null && h != null && w > 0 && h > 0) {
+                    headunitSize = w to h
+                    onLog?.invoke("headunit caps: ${w}x$h")
+                }
+            }
             Protocol.TYPE_TOUCH_EVENT -> {
                 if (payload.size >= 10) {
                     val action = payload[0]

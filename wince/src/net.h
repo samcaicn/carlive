@@ -62,6 +62,10 @@ public:
     // 返回候选 IP 列表：config.txt 显式 IP（若有）优先，其次【高可信候选】——
     //   含 UDP 信标发现的真实 IP、本机接口网关推导、主动扫描确认。全部动态，无写死地址。
     static void GetCandidates(const std::string& configIP, std::vector<std::string>& out);
+    // R12：known 候选防拖死开关。手机换了网络（IP 变化）后，known IP 每轮都排最前、
+    // 每个白等 1.5s。连续失败多轮时置 true，本轮忽略 known，让信标/网关探测先试；
+    // 连接成功（或回到首轮）复位为 false。
+    static void SetDeferKnown(bool defer);
     // 注：原先在此声明过一个成员函数 PriorityCount()，但 net.cpp 中实际存在的同名函数是文件内
     // 静态自由函数、并非本类成员；一旦有人按 NetClient::PriorityCount() 调用将直接链接失败。
     // 候选计数目前仅扫描线程内部使用，故移除这个会误导人的悬空声明。

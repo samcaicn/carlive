@@ -31,6 +31,8 @@ private:
     int m_winW, m_winH;
     int m_cx, m_cy, m_cw, m_ch; // 内容区矩形（letterbox 居中）
     DWORD m_allocFailTick;      // 上次位图分配失败的 tick：低内存时节流重试，避免每帧重复失败造成抖动
+    DWORD m_lastPaintTick;      // R9：上次请求重绘的 tick——StretchBlt 是单核车机最贵的 GUI 操作，
+                                // 手机 15fps 每帧都 InvalidateRect 会把 CPU 吃满；节流到 ~12fps 无感差异
     CRITICAL_SECTION m_cs;      // 保护 位图句柄/像素缓冲/内容矩形：present 在收帧线程，blit 与 contentRect 在 GUI 线程
     void alloc(int w, int h);
     // 按“当前窗口客户区 + 当前位图尺寸”重算 letterbox 内容矩形。调用方必须已持有 m_cs。

@@ -527,6 +527,9 @@ static std::vector<KnownPhone> g_knownPhones;  // 按最近成功倒序
 static std::vector<std::string> g_knownIPs;    // 仅 IP，供候选前置
 static CRITICAL_SECTION g_csKnown;
 static bool g_knownInit = false;
+static volatile bool g_deferKnown = false;   // R12：known 候选让路开关（SetDeferKnown）
+
+void NetClient::SetDeferKnown(bool defer) { g_deferKnown = defer; }
 
 static std::wstring knownPhonesPath() {
     WCHAR path[MAX_PATH] = {0};
@@ -575,6 +578,13 @@ void NetClient::SaveKnownPhone(const std::string& id, const std::string& ip) {
         if (g_knownPhones[i].id == id) { g_knownPhones[i].ip = ip; g_knownPhones[i].ts = (long long)time(NULL); found = true; break; }
     }
     if (!found) g_knownPhones.push_back(KnownPhone{id, ip, (long long)time(NULL)});
+    // R12：上限 8 条，超出删最旧——防长期使用后文件无限膨胀（SD 卡写入量 + 启动解析开销）
+    while (g_knownPhones.size() > 8) {
+        size_t oldest = 0;
+        for (size_t i = 1; i < g_knownPhones.size(); i++)
+            if (g_knownPhones[i].ts < g_knownPhones[oldest].ts) oldest = i;
+        g_knownPhones.erase(g_knownPhones.begin() + oldest);
+    }
     // 重排：刚连上的排最前（最近优先）
     // 写回文件
     HANDLE hf = CreateFile(knownPhonesPath().c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
@@ -641,8 +651,10 @@ void NetClient::GetCandidates(const std::string& configIP, std::vector<std::stri
     // 优先级：config.txt 显式覆盖 > 【已知手机上次IP(记住这台手机)】 > UDP 信标真实IP(最高可信) > 接口网关/扫描确认
     std::vector<std::string> tmp;
     if (!configIP.empty()) tmp.push_back(configIP);
-    std::vector<std::string> known; GetKnownIPs(known);
-    for (size_t i = 0; i < known.size(); i++) tmp.push_back(known[i]);
+    if (!g_deferKnown) {   // R12：连续失败多轮后本轮跳过 known，给信标/网关让路（防失效 IP 拖死每轮）
+        std::vector<std::string> known; GetKnownIPs(known);
+        for (size_t i = 0; i < known.size(); i++) tmp.push_back(known[i]);
+    }
     EnterCriticalSection(&g_csCand);
     if (!g_beaconIP.empty()) tmp.push_back(g_beaconIP);
     for (size_t i = 0; i < g_priIPs.size(); i++) tmp.push_back(g_priIPs[i]);

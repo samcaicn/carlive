@@ -223,6 +223,12 @@ class MirrorForegroundService : Service() {
         net.sendHandshakePhone(maxW = 800, maxH = 480, deviceId = MirrorState.loadDeviceId(this))
         // V1 车机端只解码 MJPEG（微型 JPEG 解码器），手机默认走 MJPEG 以端到端可解。
         net.sendVideoConfig(Protocol.CODEC_MJPEG, 800, 480, 15, 2_000_000)
+        // R13：短暂等待车机握手（最多 600ms），拿到真实客户区后再建 VirtualDisplay——
+        // 出图分辨率与车机 1:1，无 letterbox 拉伸。握手通常已在路上，很少真等满 600ms。
+        val t0 = android.os.SystemClock.elapsedRealtime()
+        while (net.headunitSize == null && android.os.SystemClock.elapsedRealtime() - t0 < 600) {
+            try { Thread.sleep(50) } catch (_: InterruptedException) { break }
+        }
         updateNotification("GLOAI 车机投屏 · 已连接，镜像中")
         startSenderIfReady()
     }
@@ -236,7 +242,9 @@ class MirrorForegroundService : Service() {
             return
         }
         if (sender != null) return
-        sender = MjpegSender(this, mp, net, 800, 480, 15, 70)
+        // R13：优先用车机握手上报的真实客户区建 VirtualDisplay（1:1 呈现）；未收到则回退 800×480
+        val (vw, vh) = net.headunitSize ?: (800 to 480)
+        sender = MjpegSender(this, mp, net, vw, vh, 15, 70)
         sender?.start()
         Log.i(TAG, "MjpegSender started")
         updateNotification("GLOAI 车机投屏 · 镜像中")

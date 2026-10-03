@@ -5,7 +5,7 @@
 Renderer::Renderer(HWND hwnd)
     : m_hwnd(hwnd), m_hdc(NULL), m_memDC(NULL), m_hbmp(NULL), m_bits(NULL),
       m_bmpW(0), m_bmpH(0), m_winW(0), m_winH(0),
-      m_cx(0), m_cy(0), m_cw(0), m_ch(0), m_allocFailTick(0) {
+      m_cx(0), m_cy(0), m_cw(0), m_ch(0), m_allocFailTick(0), m_lastPaintTick(0) {
     InitializeCriticalSection(&m_cs);
     m_hdc = GetDC(hwnd);
     RECT rc; GetClientRect(hwnd, &rc);
@@ -66,7 +66,13 @@ bool Renderer::present(const BYTE* rgb, int w, int h) {
     if (!ok) return false;
 
     // 请求 GUI 线程重绘（WM_PAINT → blit）。不在此处直接绘制，保证绘制唯一发生在 GUI 线程。
-    InvalidateRect(m_hwnd, NULL, FALSE);
+    // R9 节流：m_bits 始终是最新帧，跳过中间的 InvalidateRect 是安全的——最终任意一次
+    // blit 画出的都是最新画面。80ms 窗口 ≈ 上限 12.5fps，肉眼无差异，省下大半 GUI CPU。
+    DWORD now = GetTickCount();
+    if (now - m_lastPaintTick >= 80) {
+        m_lastPaintTick = now;
+        InvalidateRect(m_hwnd, NULL, FALSE);
+    }
     return true;
 }
 
