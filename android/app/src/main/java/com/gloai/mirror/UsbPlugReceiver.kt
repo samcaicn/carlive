@@ -15,13 +15,15 @@ import android.os.Build
 class UsbPlugReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context?, intent: Intent?) {
         val c = context ?: return
-        val action = intent?.action ?: return
-        val connected = when (action) {
+        // 注意：外层局部变量不能叫 action，否则会遮蔽 Intent.apply{} 里的 action 属性赋值
+        // （Kotlin 局部变量优先于隐式接收者成员），导致编译期 "Val cannot be reassigned"。
+        val usbAction = intent?.action ?: return
+        val connected = when (usbAction) {
             UsbManager.ACTION_USB_DEVICE_ATTACHED -> true
             "android.intent.action.USB_STATE" -> intent.getBooleanExtra("connected", false)
             else -> false
         }
-        val disconnected = when (action) {
+        val disconnected = when (usbAction) {
             UsbManager.ACTION_USB_DEVICE_DETACHED -> true
             "android.intent.action.USB_STATE" -> !intent.getBooleanExtra("connected", true)
             else -> false
