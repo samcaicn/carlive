@@ -1,34 +1,5 @@
-# tuptup.top Mirror - gitignore
-*.iml
-.gradle/
-build/
-android/.gradle/
-android/local.properties
-android/app/build/
-wince/build/
-.DS_Store
-Thumbs.db
-*.log
-*.apk
-
-# QEMU 测试沙箱大文件（data.img 由 make-datadisk.sh 重新生成；NK 取自 wince-qemu-novnc-sandbox 技能 assets），不入仓
-qemu-test/images/data.img
-qemu-test/images/data*.img
-qemu-test/images/NK.bin.load-0x800010c0.raw
-qemu-test/images/NK.zip
-# 沙箱运行产物：QMP 抓帧 ppm/png、灌入数据盘的中间文件（每次调试重新生成，无价值）
-qemu-test/*.png
-qemu-test/*.ppm
-qemu-test/images/*.png
-qemu-test/images/*.ppm
-# 沙箱灌盘用的 exe 副本（真正的交付物只有 wince/tuptup.exe，由 CI 现场编译）
-qemu-test/stage/
-qemu-test/stage3/
-qemu-test/images/stage*/
-
-# 签名密钥与口令：绝不入仓，只在 CI 由 secrets 注入
-android/key.properties
-android/app/*.jks
-android/app/*.keystore
-*.jks
-*.keystore
+# QEMU WinCE 沙箱资产（26MB NK 镜像 + 数据盘），需按技能脚本重新下载，不入库
+wince/sandbox/images/
+*.raw
+*.img
+*.ppm
