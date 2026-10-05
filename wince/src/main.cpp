@@ -106,6 +106,10 @@ static bool validIPv4(const char* s) {
 static int g_cfgPort = 8686;
 // 连接模式：由 config.txt 的 mode= 行决定（默认 usb_net=直连 8686）。
 static int g_cfgMode = NetClient::CONN_MODE_USB_NET;
+// R27：config.txt 的 noLocalIP=1 —— 跳过 GetAdaptersInfo 网卡枚举（真车 A/B 排障开关）。
+// 记在这里是为了能在启动日志里回显实际生效值：SD 卡上的 config.txt 可能被手工改过多轮，
+// 日志里没有这行就无法判断某次崩溃是否真的在"跳过枚举"的状态下发生。
+static int g_cfgNoLocalIP = 0;
 // 模式切换 toast（短暂提示，非镜像态也能看到）
 static wchar_t g_toastText[128] = L"";
 static DWORD    g_toastUntil = 0;
@@ -139,6 +143,17 @@ static std::string readConfig() {
                 if (sscanf(body.c_str(), "mode=%31s", mbuf) == 1) {
                     if (strcmp(mbuf, "usb_adb") == 0) g_cfgMode = NetClient::CONN_MODE_USB_ADB;
                     else if (strcmp(mbuf, "usb_net") == 0) g_cfgMode = NetClient::CONN_MODE_USB_NET;
+                    continue;
+                }
+                // R27：noLocalIP=1 → 完全跳过 GetAdaptersInfo 网卡枚举。
+                // 真车 A/B 排障开关：怀疑 GetAdaptersInfo（或其后的 IP_ADAPTER_INFO
+                // 链表遍历）在车机 CE 版本上崩溃时，改这一行即可验证，不需重新构建。
+                // 代价：本机 IP 相关功能失效（网段变化判定、网关推导候选、写死 IP 同子网校验），
+                // 但 UDP 信标发现与子网主动扫描仍可用 —— 连不上时的影响是可接受的。
+                int noip = 0;
+                if (sscanf(body.c_str(), "noLocalIP=%d", &noip) == 1) {
+                    g_cfgNoLocalIP = (noip != 0) ? 1 : 0;
+                    NetClient::SetSkipLocalIP(noip != 0);
                     continue;
                 }
                 char h[64]; int pnum = 0;
@@ -280,8 +295,9 @@ static DWORD WINAPI ConnThread(LPVOID) {
     CrashSetStage("ConnThread:LocalIPv4");
     std::string localIP = NetClient::LocalIPv4();
     CrashSetStage("ConnThread:logStart");
-    Log("ConnThread start, configIP='%s' port=%d mode=%s localIP=%s",
-        cfg.c_str(), g_cfgPort, NetClient::ModeName(), localIP.c_str());
+    Log("ConnThread start, configIP='%s' port=%d mode=%s localIP=%s noLocalIP=%d",
+        cfg.c_str(), g_cfgPort, NetClient::ModeName(), localIP.c_str(),
+        g_cfgNoLocalIP ? 1 : 0);
     // R21 崩溃哨兵：真车实测日志稳定停在上一行，下一条 first GetCandidates 从未出现。
     // 在两者之间逐行打点，下次再闪退时能精确知道死在哪一步（而不是只知道"在 GetCandidates 里"）。
     Log("[stage] sentinel A: 即将进入 first GetCandidates");

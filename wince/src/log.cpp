@@ -21,15 +21,31 @@ static char     g_lastMsg[384] = "";
 static DWORD    g_lastSameTick = 0;
 static DWORD    g_lastFlush = 0;
 
+// R27：日志文件名从 EXE 自身文件名派生 —— SD 卡上要同时放多个候选 exe 做 A/B 对比，
+// 若都写死 tuptup.log，后启动的会覆盖前者的日志（甚至滚动成 .bak 丢掉），
+// 排障时只能看到最后跑的那一个，对比实验直接失效。
+// "\SDMEMORY2\carlive\wince\tuptup-usbnet.exe" → "...\tuptup-usbnet.log"
+// 无扩展名（或点在目录分隔符左侧）时追加后缀而不是替换。
+static void logPathFromModule(WCHAR* path, DWORD cap, const WCHAR* ext) {
+    WCHAR* slash = wcsrchr(path, L'\\');
+    WCHAR* dot   = wcsrchr(path, L'.');
+    if (dot && dot > (slash ? slash : path - 1)) *dot = 0;   // 截掉原扩展名
+    // 追加 ext（长度受 cap 约束，cap 按 MAX_PATH 传入足够）
+    size_t used = wcslen(path), add = wcslen(ext);
+    if (used + add < (size_t)cap) wcscat(path, ext);
+}
+
 void LogInit() {
     g_startTick = GetTickCount();
     InitializeCriticalSection(&g_csLog);
     WCHAR path[MAX_PATH] = {0};
     if (GetModuleFileName(NULL, path, MAX_PATH)) {
-        WCHAR* p = wcsrchr(path, L'\\');
-        if (p) wcscpy(p + 1, L"tuptup.log");
-        else wcscpy(path, L"tuptup.log");   // R15：exe 在根目录（无 \）时回退到当前目录文件名
-        // 日志滚动：SD 卡空间有限，超过 256KB 时把旧日志改名为 tuptup.log.bak（仅保留一份备份），避免无限增长。
+        logPathFromModule(path, MAX_PATH, L".log");
+    } else {
+        wcscpy(path, L"tuptup.log");   // 取不到模块名时的兜底：回退到当前目录默认名
+    }
+    {
+        // 日志滚动：SD 卡空间有限，超过 256KB 时把旧日志改名（仅保留一份备份），避免无限增长。
         HANDLE hSize = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
         if (hSize != INVALID_HANDLE_VALUE) {
             DWORD sz = GetFileSize(hSize, NULL);

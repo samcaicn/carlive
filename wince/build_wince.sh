@@ -14,13 +14,30 @@ echo ">> CWD = $SCRIPT_DIR"
 echo ">> CC  = $CC"
 ls -la src || true
 
-OUT="$SCRIPT_DIR/tuptup.exe"
-echo ">> building $OUT"
-"$CC" -O2 -Wall -Wno-unused-function \
+# R27：VARIANT=usbnet 构建「单 USB 共享网络」变体。
+# 该变体编译带 -DUSB_NET_ONLY：不含 ADB 隧道（adb.cpp/rsa.cpp 不进链接），
+# 模式恒为 usb_net。用于真车 A/B 对比，排除 ADB 模块与 exe 体积的影响。
+# 产物名随 variants 变化，使得日志文件名（由 EXE 名派生）也各自独立。
+VARIANT="${VARIANT:-full}"
+case "$VARIANT" in
+  full)
+    EXTRA_FLAGS=""
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
+    OUT="$SCRIPT_DIR/tuptup.exe"
+    ;;
+  usbnet)
+    EXTRA_FLAGS="-DUSB_NET_ONLY"
+    EXTRA_SRC=()
+    OUT="$SCRIPT_DIR/tuptup-usbnet.exe"
+    ;;
+  *) echo "ERROR: 未知 VARIANT=$VARIANT（支持: full | usbnet）" >&2; exit 2 ;;
+esac
+
+echo ">> building $OUT  (VARIANT=$VARIANT)"
+"$CC" -O2 -Wall -Wno-unused-function $EXTRA_FLAGS \
   "$SCRIPT_DIR/src/main.cpp" \
   "$SCRIPT_DIR/src/net.cpp" \
-  "$SCRIPT_DIR/src/adb.cpp" \
-  "$SCRIPT_DIR/src/rsa.cpp" \
+  "${EXTRA_SRC[@]+"${EXTRA_SRC[@]}"}" \
   "$SCRIPT_DIR/src/tcptransport.cpp" \
   "$SCRIPT_DIR/src/renderer.cpp" \
   "$SCRIPT_DIR/src/decoder.cpp" \

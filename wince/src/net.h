@@ -84,6 +84,9 @@ public:
     static bool IsSameSubnet(const char* ip);
     // 本机当前私有网段主地址（判定网段变化用），取不到返回空串。
     static std::string LocalIPv4();
+    // R27：跳过网卡枚举开关（config.txt: noLocalIP=1）。
+    // 用于对 GetAdaptersInfo 路径做运行时 A/B —— 详见 net.cpp 中该变量的注释。
+    static void SetSkipLocalIP(bool on);
 
     // ---- 连接模式（USB 网络共享 vs USB 调试/ADB 隧道）----
     // CONN_MODE_USB_NET：直连手机 8686（原有行为，默认）。

@@ -26,16 +26,33 @@ static void safeCpy(char* dst, const char* src, unsigned cap) {
     dst[i] = 0;
 }
 
+// R27：与 log.cpp 同理，crash.log 名要从 EXE 自身文件名派生。
+// SD 卡上同时放多个候选 exe 做 A/B 对比时，若都写 crash.log，
+// 后启动者覆盖前者，对比实验得到的 stage 就不再是自己那次崩溃的。
+// "\...\tuptup-usbnet.exe" → "\...\tuptup-usbnet.crash.log"
+// 本函数只做纯 WCHAR 处理，不引入任何动态分配或库依赖（保持本文件零依赖原则）。
+static void crashPathFromModule(WCHAR* path, const WCHAR* ext) {
+    WCHAR* slash = wcsrchr(path, L'\\');
+    WCHAR* dot   = wcsrchr(path, L'.');
+    if (dot && dot > (slash ? slash : path - 1)) *dot = 0;  // 截掉 ".exe"
+    // 手工拼接，避免依赖 wcscat（本文件刻意只用最小 Win32 面）
+    unsigned i = 0; while (path[i]) i++;
+    unsigned j = 0;
+    while (ext[j] && i < MAX_PATH - 1) { path[i++] = ext[j++]; }
+    path[i] = 0;
+}
+
 static void openCrashFile(void) {
     if (g_hCrash != INVALID_HANDLE_VALUE) return;
     WCHAR path[MAX_PATH];
     memset(path, 0, sizeof(path));
     if (GetModuleFileName(NULL, path, MAX_PATH)) {
-        WCHAR* p = wcsrchr(path, L'\\');
-        if (p) wcscpy(p + 1, L"crash.log");
-        else wcscpy(path, L"crash.log");
+        crashPathFromModule(path, L".crash.log");
     } else {
-        wcscpy(path, L"crash.log");
+        // 取不到模块名时的兜底（与 log.cpp 一致）
+        const WCHAR* d = L"tuptup.crash.log";
+        unsigned i = 0; while (d[i]) { path[i] = d[i]; i++; }
+        path[i] = 0;
     }
     g_hCrash = CreateFile(path, GENERIC_WRITE, FILE_SHARE_READ, NULL,
                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);

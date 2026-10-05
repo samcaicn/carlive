@@ -126,6 +126,24 @@ jobs:
         with:
           name: tuptup-wince-exe
           path: wince/tuptup.exe
+      # R27：同时产出「单 USB 共享网络」变体。SD 卡上要与完整版做 A/B 对比：
+      # 该变体不含 ADB 隧道，可排除 ADB 模块本身导致真车崩溃的可能。
+      - name: Build usbnet-only variant (no ADB)
+        run: |
+          cd wince
+          chmod +x build_wince.sh
+          VARIANT=usbnet ./build_wince.sh
+      - name: Verify usbnet variant PE
+        run: |
+          ls -la wince/tuptup-usbnet.exe
+          /opt/cegcc-arm/bin/arm-mingw32ce-objdump -f wince/tuptup-usbnet.exe \
+            | grep -qi "architecture: arm" || { echo "ERROR: usbnet variant not ARM"; exit 1; }
+          echo "usbnet variant: ARM OK"
+      - name: Upload usbnet variant
+        uses: actions/upload-artifact@v4
+        with:
+          name: tuptup-wince-usbnet-exe
+          path: wince/tuptup-usbnet.exe
 
   source-check:
     name: Source sanity check

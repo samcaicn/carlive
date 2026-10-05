@@ -2,7 +2,13 @@
 #include "net.h"
 #include "log.h"
 #include "tcptransport.h"
+// R27：USB_NET_ONLY 构建变体 —— 本二进制完全不含 ADB 隧道实现（adb.cpp/rsa.cpp 也不进链接）。
+// 用途：真车 A/B 对比。ADB 模块含 RSA 密钥握手与 ADB 协议解析，占可观的代码与静态数据量；
+// 砍掉它能一次性排除"ADB 相关静态初始化/类构造在 CE 上出问题"这一整类可能，
+// 同时验证 exe 体积与静态数据是否触及 WinCE 的加载限制。
+#ifndef USB_NET_ONLY
 #include "adb.h"
+#endif
 #include "thread.h"
 #include "crashlog.h"
 #include <ws2tcpip.h>
@@ -33,8 +39,14 @@ static volatile LONG g_adaptBufTooBig = 0;
 // 连接模式：默认直连（USB 网络共享）。可在 config.txt 设 mode=usb_adb 切到 ADB 隧道。
 static int s_mode = NetClient::CONN_MODE_USB_NET;
 void NetClient::SetMode(int m) {
+#ifdef USB_NET_ONLY
+    // 单 usb_net 变体：无论 config.txt 写什么都落到 USB 共享网络直连。
+    (void)m;
+    s_mode = CONN_MODE_USB_NET;
+#else
     if (m == CONN_MODE_USB_ADB) s_mode = CONN_MODE_USB_ADB;
     else s_mode = CONN_MODE_USB_NET;
+#endif
     Log("NetClient: 模式切换为 %s", ModeName());
 }
 int NetClient::GetMode() { return s_mode; }
@@ -58,8 +70,12 @@ bool NetClient::connect(const std::wstring& host, int port) {
     close();
     // 与 connectTimeout 保持一致：按模式选传输（ADB 隧道 vs 直连），
     // 避免将来有人调用本接口时落到错误的底层连接。
+#ifdef USB_NET_ONLY
+    m_transport = new TcpTransport();
+#else
     if (s_mode == CONN_MODE_USB_ADB) m_transport = new AdbTransport();
     else m_transport = new TcpTransport();
+#endif
     if (!m_transport->connect(host, port, 10000)) { delete m_transport; m_transport = NULL; return false; }
     // 记录命中 IP（配合 device_id 记忆）
     char ipbuf[64] = {0};
@@ -75,6 +91,9 @@ bool NetClient::connectTimeout(const std::wstring& host, int port, int timeoutMs
     close(); // 防御：丢弃任何残留连接，避免重连路径下泄漏/复用旧连接
     // 按模式选择底层传输：usb_adb 走 ADB 隧道（连手机 5555 → OPEN tcp:8686），
     // 其余直连手机 8686（原有行为）。候选 host 都是手机 IP，ADB 模式忽略 port（用 5555）。
+#ifdef USB_NET_ONLY
+    m_transport = new TcpTransport();
+#else
     if (s_mode == CONN_MODE_USB_ADB) {
         char ipbuf[64] = {0};
         WideCharToMultiByte(CP_ACP, 0, host.c_str(), -1, ipbuf, sizeof(ipbuf), NULL, NULL);
@@ -83,6 +102,7 @@ bool NetClient::connectTimeout(const std::wstring& host, int port, int timeoutMs
     } else {
         m_transport = new TcpTransport();
     }
+#endif
     if (!m_transport->connect(host, port, timeoutMs)) {
         delete m_transport; m_transport = NULL;
         return false;
@@ -337,7 +357,21 @@ static bool parseIPv4(const char* s, unsigned out[4]) {
 //     之前就求值完了。
 // 但 R21 加的三重防御本身是**有价值且应保留**的：buflen 上限封顶（防脏数据导致巨量分配）、
 // resize 包 try/catch（防异常逃逸线程）、分配后 memset清零（防未初始化结构里的 Next 野指针）。
+// R27：此开关由 config.txt 的 `noLocalIP=1` 打开。打开后**所有**走 GetAdaptersInfo 的路径
+// 全部跳过网卡枚举（返回"无网卡"），四个调用点无需各自改动。
+// 存在的理由：这是当前唯一还没排查干净的崩溃嫌疑——crash.log 已把崩溃点锁到
+// LocalIPv4/GetAdaptersInfo 附近，但需要确定性证据。开关打开后若不再闪退，
+// 即可 100% 确认元凶在这条路径，且**不必重新构建/CI**，改 SD 卡上的 config.txt 即可反复 A/B。
+static bool g_skipLocalIP = false;
+void NetClient::SetSkipLocalIP(bool on) { g_skipLocalIP = on; }
+
 static ULONG AdapterBufLen(ULONG* out) {
+    if (g_skipLocalIP) {
+        // 返回非 ERROR_BUFFER_OVERFLOW → 调用点的 `!= ERROR_BUFFER_OVERFLOW` 判据成立，
+        // 走"无网卡"分支直接返回，第二次 GetAdaptersInfo 与链表遍历都不会执行。
+        CrashSetStage("AdapterBufLen:skipped(noLocalIP=1)");
+        return ERROR_NO_DATA;
+    }
     // R26：这行之前没有任何打点 —— 它是网卡枚举路径上第一条真正执行的 Win32 调用。
     // 若崩溃发生在 GetAdaptersInfo 首次调用内部，crash.log 会停在上一个调用点的stage
     // 上（看起来像"崩在 readConfig"），把排查范围误导回完全无关的函数。
