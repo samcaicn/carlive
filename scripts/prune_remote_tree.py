@@ -53,11 +53,15 @@ def gh(method, path, body=None, retries=4):
 
 
 def git_text(*args):
-    return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout
+    # -c core.quotepath=false：默认 git 会把中文等非 ASCII 路径转义成带引号的八进制串，
+    # 建出来的 tree 里路径名会变成 \345\215\241… 这种鬼东西，远端直接多出一堆垃圾文件。
+    return subprocess.run(["git", "-c", "core.quotepath=false", *args],
+                          check=True, capture_output=True, text=True).stdout
 
 
 def git_bytes(*args):
-    return subprocess.run(["git", *args], check=True, capture_output=True).stdout
+    return subprocess.run(["git", "-c", "core.quotepath=false", *args],
+                          check=True, capture_output=True).stdout
 
 
 def remote_blobs(tree_sha):
@@ -110,12 +114,19 @@ def main():
     changed = sorted(p for p in set(local) & set(remote) if local[p] != remote[p])
     for p in changed:
         print(f"  M  {p}  {remote[p][:9]} -> {local[p][:9]}")
+    # 新增文件也必须算进"有差异"。原实现只比 stale(远端多出) 与 changed(同名不同)，
+    # 于是【纯新增文件的提交】会被判成"远端与本地完全一致，无需处理"而直接 return ——
+    # 调用方以为推送成功了，实际远端一个字节没动。实测踩过：一次提交只加了
+    # scripts/collect_car_logs.py 等 3 个新文件，脚本就说"无需处理"。
+    added = sorted(set(local) - set(remote))
+    for p in added:
+        print(f"  A  {p}  {local[p][:9]}")
 
-    if not stale and not changed:
+    if not stale and not changed and not added:
         print("远端与本地完全一致，无需处理")
         return
     if not stale:
-        print(f"无残留文件，但有 {len(changed)} 个文件内容不同，继续推送")
+        print(f"无残留文件，但有 {len(changed)} 个内容变更 / {len(added)} 个新增文件，继续推送")
 
     # 复用远端已有 blob 的 sha（内容相同 sha 就相同），只上传远端没有的
     remote_sha_set = set(remote.values())
