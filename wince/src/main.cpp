@@ -256,8 +256,16 @@ static DWORD WINAPI ConnThread(LPVOID) {
     if (g_cfgMode != NetClient::GetMode()) NetClient::SetMode(g_cfgMode);
     // R16：把本机实际网段打进启动日志。网段问题排查的第一步就是确认"车机到底在哪个网段"，
     // 旧版日志里没有这条，导致只能靠猜（实测踩了 6.8 小时）。
+    //
+    // R22 关键修复：**LocalIPv4() 不再作为 Log() 的参数内联求值**。
+    // 它内部会调 GetAdaptersInfo，而 R21 在该链路里放了 Log() —— 于是形成
+    // "Log(参数)→ LocalIPv4() → Log() → EnterCriticalSection(同一把 g_csLog)"
+    // 的嵌套加锁 + g_lastMsg 节流状态机重入竞态。
+    // 真车实测后果：日志稳定停在 `discovery started`，`ConnThread start` 一行都没有，
+    // 崩溃点比修复前**更早**。先取到字符串再打日志，彻底断开这条链。
+    std::string localIP = NetClient::LocalIPv4();
     Log("ConnThread start, configIP='%s' port=%d mode=%s localIP=%s",
-        cfg.c_str(), g_cfgPort, NetClient::ModeName(), NetClient::LocalIPv4().c_str());
+        cfg.c_str(), g_cfgPort, NetClient::ModeName(), localIP.c_str());
     // R21 崩溃哨兵：真车实测日志稳定停在上一行，下一条 first GetCandidates 从未出现。
     // 在两者之间逐行打点，下次再闪退时能精确知道死在哪一步（而不是只知道"在 GetCandidates 里"）。
     Log("[stage] sentinel A: 即将进入 first GetCandidates");
@@ -701,7 +709,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
     Log("discovery started");
 
     // 连接管理放到后台线程，主线程只跑消息泵 → 窗口可正常绘制/关闭，不再“启动卡死”
+    // R22：补CreateThread 失败检查。此前失败会静默无日志 → 界面正常但永远不连，
+    // 与"启动即闪退"症状混淆，排障方向被带偏。
     g_hConnThread = CreateThread(NULL, 0, ConnThread, NULL, 0, NULL);
+    if (!g_hConnThread) Log("FATAL: ConnThread CreateThread 失败 (err=%u), 仅界面运行", (unsigned)GetLastError());
+    else Log("ConnThread created");
 
     // 主线程：永久消息泵
     MSG msg;

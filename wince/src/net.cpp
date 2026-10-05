@@ -24,6 +24,10 @@ DWORD NetClient::LastRecvTick() { return (DWORD)g_lastRecvTick; }
 void NetClient::ResetRecvTick() { g_lastRecvTick = GetTickCount(); }
 long NetClient::ConnEpoch() { return g_epoch; }
 
+// R22：AdapterBufLen 观测到的异常 buflen（>64KB）。仅置标志，由调用点在安全位置上报，
+//绝不在网卡枚举内部调Log()（详见 AdapterBufLen 注释）。
+static volatile LONG g_adaptBufTooBig = 0;
+
 // 连接模式：默认直连（USB 网络共享）。可在 config.txt 设 mode=usb_adb 切到 ADB 隧道。
 static int s_mode = NetClient::CONN_MODE_USB_NET;
 void NetClient::SetMode(int m) {
@@ -335,7 +339,14 @@ static ULONG AdapterBufLen(ULONG* out) {
     ULONG rc = GetAdaptersInfo(NULL, &need);
     if (need == 0) return rc;
     if (need > 64 * 1024) {
-        Log("net: GetAdaptersInfo 报异常 buflen=%u，超过 64KB 上限，按无效处理", (unsigned)need);
+        // R22：这里【绝不能调 Log()】。本函数会被 LocalIPv4() 调用，而 LocalIPv4() 又是
+        // main.cpp 里 Log("ConnThread start,...localIP=%s", ..., LocalIPv4().c_str()) 的
+        // **参数表达式** —— 即在 Log() 尚未 EnterCriticalSection 时，内层又要抢同一把 g_csLog
+        // 并改写节流用的 g_lastMsg/g_lastSameTick，构成重入竞态。
+        // 实测后果（R21 真车 6 次）：日志稳定停在 `discovery started`，`ConnThread start`
+        // 一行都没有 —— 崩溃点比 R20 更早，说明本函数本身就是新引入的崩溃源。
+        // 改为置标志，由调用点在自身安全位置（已经进入 Log 或主循环）统一上报。
+        g_adaptBufTooBig = need;
         return ERROR_BUFFER_OVERFLOW;
     }
     *out = need;
