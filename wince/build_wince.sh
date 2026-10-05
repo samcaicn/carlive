@@ -25,6 +25,7 @@ echo ">> building $OUT"
   "$SCRIPT_DIR/src/renderer.cpp" \
   "$SCRIPT_DIR/src/decoder.cpp" \
   "$SCRIPT_DIR/src/log.cpp" \
+  "$SCRIPT_DIR/src/crashlog.cpp" \
   -o "$OUT" \
   -lws2 -liphlpapi \
   -static-libgcc -static-libstdc++

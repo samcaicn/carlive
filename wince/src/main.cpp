@@ -8,6 +8,7 @@
 #include "decoder.h"
 #include "log.h"
 #include "thread.h"
+#include "crashlog.h"
 
 #include <windows.h>
 #include <process.h>
@@ -253,20 +254,32 @@ static bool HasIPIn(const std::vector<std::string>& v, const std::string& ip) {
 
 static DWORD WINAPI ConnThread(LPVOID) {
     // R23 存活哨兵：这是本线程的第一条语句。若日志出现它，说明线程成功启动、
-    // 且栈没有在入口就溢出。历史上真车日志稳定停在本行**之前**（discovery started），
-    // 即线程一创建就死—— 根因是 WinCE 忽略 dwStackSize、默认栈仅 64KB。
+    // 且栈没有在入口就溢出。R23 修复后真车已能稳定打出这一行（此前停在它之前）。
     Log("[stage] ConnThread entered");
+    // R24：逐行标记当前步骤。R23 把栈从 64KB 提到 128KB 后线程成功进入，
+    // 但随即死在下一行 —— 说明栈问题已解决，暴露的是第二个独立故障。
+    // 到这里已经连续猜错三次（R21 猜OOM、R22 猜嵌套加锁、R23 猜栈），
+    // 不能再靠推断，必须让崩溃现场自己说话：CrashSetStage 写入的步骤名
+    // 会由 SetUnhandledExceptionFilter 在崩溃时落到 crash.log 的 stage= 字段。
+    CrashSetStage("ConnThread:readConfig");
     int failRounds = 0;   // 连续连接失败轮次（用于退避，成功即清零）
     std::string cfg = readConfig();
+    CrashSetStage("ConnThread:SetMode");
     if (g_cfgMode != NetClient::GetMode()) NetClient::SetMode(g_cfgMode);
     // R16：把本机实际网段打进启动日志。网段问题排查的第一步就是确认"车机到底在哪个网段"，
     // 旧版日志里没有这条，导致只能靠猜（实测踩了 6.8 小时）。
     //
     // R22 曾把这里写成Log(..., LocalIPv4().c_str()) 并归因为"嵌套加锁导致闪退"——
     // 该归因是错的：C++ 实参在进入 Log 函数体、EnterCriticalSection 之前就已求值完毕，
-    // 不存在嵌套持锁。真正的崩溃是线程栈溢出（见 thread.h），已由 TltpCreateThread 修复。
+    // 不存在嵌套持锁。真正的崩溃一度是线程栈溢出（见 thread.h），已由 TltpCreateThread 修复。
     // 这里保持"先取值再打日志"的写法（更易读，且避免把 GetAdaptersInfo 塞进实参列表）。
+    //
+    // R24：LocalIPv4() 内部会真正执行第二次 GetAdaptersInfo 并遍历 IP_ADAPTER_INFO 链表——
+    // 这是 QEMU 沙箱结构上永远走不到的路径（沙箱无网卡，GetAdaptersInfo 首次调用即失败，
+    // need==0 提前返回），因此"沙箱实测通过"并不能证明这条路径安全。
+    CrashSetStage("ConnThread:LocalIPv4");
     std::string localIP = NetClient::LocalIPv4();
+    CrashSetStage("ConnThread:logStart");
     Log("ConnThread start, configIP='%s' port=%d mode=%s localIP=%s",
         cfg.c_str(), g_cfgPort, NetClient::ModeName(), localIP.c_str());
     // R21 崩溃哨兵：真车实测日志稳定停在上一行，下一条 first GetCandidates 从未出现。
@@ -634,6 +647,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
     LogInit();
+    // R24：尽早装上崩溃捕获。必须早于一切可能崩的调用——
+    // 此前连续三次闪退（R21/R22/R23）都只能靠排除法猜，猜错三次。
+    CrashLogInit();
+    CrashSetStage("WinMain:init");
     // R10：单实例保护。双开会让两份 ConnThread 同时连手机、触摸双发、信标端口/日志互踩。
     HANDLE hSingle = CreateMutex(NULL, TRUE, TEXT("Tuptup_Mirror_SingleInstance"));
     if (!hSingle || GetLastError() == ERROR_ALREADY_EXISTS) {

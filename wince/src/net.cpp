@@ -4,6 +4,7 @@
 #include "tcptransport.h"
 #include "adb.h"
 #include "thread.h"
+#include "crashlog.h"
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 #include <cstring>
@@ -356,14 +357,17 @@ static ULONG AdapterBufLen(ULONG* out) {
 bool NetClient::IsSameSubnet(const char* ip) {
     unsigned t[4];
     if (!parseIPv4(ip, t)) return false;
+    CrashSetStage("IsSameSubnet:AdapterBufLen");
     ULONG buflen = 0;
     if (AdapterBufLen(&buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0) return false;
     std::vector<BYTE> buf;
     try { buf.resize(buflen); } catch (...) { return false; }
     if (buf.empty()) return false;
     memset(&buf[0], 0, buflen);
+    CrashSetStage("IsSameSubnet:GetAdaptersInfo2");
     PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)&buf[0];
     if (GetAdaptersInfo(pAdapters, &buflen) != NO_ERROR) return false;
+    CrashSetStage("IsSameSubnet:walkChain");
     for (PIP_ADAPTER_INFO p = pAdapters; p; p = p->Next) {
         for (PIP_ADDR_STRING addr = &p->IpAddressList; addr; addr = addr->Next) {
             unsigned a, b, c, d;
@@ -377,14 +381,18 @@ bool NetClient::IsSameSubnet(const char* ip) {
 
 // 本机当前主地址（判定网段变化用）：取第一个私有网段 IPv4，取不到返回空。
 std::string NetClient::LocalIPv4() {
+    CrashSetStage("LocalIPv4:AdapterBufLen");
     ULONG buflen = 0;
     if (AdapterBufLen(&buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0) return "";
+    CrashSetStage("LocalIPv4:vectorResize");
     std::vector<BYTE> buf;
     try { buf.resize(buflen); } catch (...) { return ""; }
     if (buf.empty()) return "";
     memset(&buf[0], 0, buflen);
+    CrashSetStage("LocalIPv4:GetAdaptersInfo2");
     PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)&buf[0];
     if (GetAdaptersInfo(pAdapters, &buflen) != NO_ERROR) return "";
+    CrashSetStage("LocalIPv4:walkChain");
     for (PIP_ADAPTER_INFO p = pAdapters; p; p = p->Next) {
         for (PIP_ADDR_STRING addr = &p->IpAddressList; addr; addr = addr->Next) {
             unsigned a, b, c, d;
@@ -402,6 +410,7 @@ std::string NetClient::LocalIPv4() {
 // 关键修正：网关/.1 必须【先探测 8686 通了才加为候选】——否则车机自身的 WiFi 路由器网关
 // （如 192.168.43.1）会被当成手机反复连、每轮白等 1.5s。路由器没有 8686，探测必失败，自然被排除。
 static void AddInterfaceGateways() {
+    CrashSetStage("AddInterfaceGateways:AdapterBufLen");
     ULONG buflen = 0;
     if (AdapterBufLen(&buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0)
         return;
@@ -409,8 +418,10 @@ static void AddInterfaceGateways() {
     try { buf.resize(buflen); } catch (...) { return; }
     if (buf.empty()) return;
     memset(&buf[0], 0, buflen);
+    CrashSetStage("AddInterfaceGateways:GetAdaptersInfo2");
     PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)&buf[0];
     if (GetAdaptersInfo(pAdapters, &buflen) != NO_ERROR) return;
+    CrashSetStage("AddInterfaceGateways:walkChain");
     for (PIP_ADAPTER_INFO p = pAdapters; p; p = p->Next) {
         // 优先使用网卡自身上报的真实网关（USB 共享下即手机地址）；探测通才加
         unsigned ga, gb, gc, gd;
@@ -493,6 +504,7 @@ static DWORD WINAPI SubnetScanThread(LPVOID) {
     while (g_discoveryOn) {
         if (g_linkUp) { Sleep(1000); continue; }   // 已连上：暂停扫描，不浪费资源/不打扰手机
 
+        CrashSetStage("SubnetScan:AdapterBufLen");
         ULONG buflen = 0;
         if (AdapterBufLen(&buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0) {
             Sleep(2000); continue;
@@ -501,8 +513,10 @@ static DWORD WINAPI SubnetScanThread(LPVOID) {
         try { buf.resize(buflen); } catch (...) { Sleep(2000); continue; }
         if (buf.empty()) { Sleep(2000); continue; }
         memset(&buf[0], 0, buflen);
+        CrashSetStage("SubnetScan:GetAdaptersInfo2");
         PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)&buf[0];
         if (GetAdaptersInfo(pAdapters, &buflen) != NO_ERROR) { Sleep(2000); continue; }
+        CrashSetStage("SubnetScan:walkChain");
 
         // R19 首次连接健壮性：WinCE 开机后 WiFi 网卡往往**几十秒后才拿到 IP**，
         // 而旧的 AddInterfaceGateways() 只在发现线程启动那一刻调一次 ——
