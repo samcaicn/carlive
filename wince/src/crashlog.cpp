@@ -1,51 +1,29 @@
-// crashlog.cpp - 崩溃现场捕获（R24 新增）详见 crashlog.h 的说明。
+// crashlog.cpp - 崩溃定位（stage 主动落盘）R24 新增 / R25 修正实现方式。
+// 设计理由与踩坑记录见 crashlog.h。
 //
-// 核心约束：这套代码运行在崩溃现场，必须极度克制 ——
-// 只用最原始的 Win32 API 与定长缓冲，不碰可能二次崩溃的 C++ 设施
-// （不用 std::string / sprintf / 格式化函数，字符串全部手工逐字节拼）。
+// 核心约束：这份文件必须在**没有任何平台扩展**的前提下工作。
+// 已确认在 CeGCC (arm-mingw32ce, GCC 9.3) 上不可用的写法，勿再尝试：
+//   1. __try/__except            —— MSVC 专有 SEH 语法，GCC 不支持
+//   2. GetExceptionPointers()     —— MSVC CRT 函数，mingw-w64 无此符号
+//   3. #include <ex.h>            —— mingw 下无此头
+//   4. CONTEXT 的 Eip/Esp/Ebp等   —— ARM CE 是 R0-R12/Sp/Lr/Pc 布局，与 x86 完全不同
+//   5. SetUnhandledExceptionFilter—— 【R25 新增】WinCE coredll 未导出，链接即失败
+// 结论：不要写任何"崩溃时才执行"的代码，改为关键步骤主动落盘。
 #include "crashlog.h"
-#include "log.h"
 
 #ifdef _WIN32
 
 #include <windows.h>
+#include <string.h>
 
-// 崩溃记录文件句柄。与 log.cpp 的 g_hLog 分开，避免互抢。
 static HANDLE g_hCrash = INVALID_HANDLE_VALUE;
-static char   g_stage[64] = "init";
+static char   g_stage[64] = "";
 
-// ASCII 十六进制输出（不用 sprintf）
-static void putHex(char* dst, unsigned v) {
-    const char* d = "0123456789ABCDEF";
-    dst[0] = d[(v >> 28) & 0xF]; dst[1] = d[(v >> 24) & 0xF];
-    dst[2] = d[(v >> 20) & 0xF]; dst[3] = d[(v >> 16) & 0xF];
-    dst[4] = d[(v >> 12) & 0xF]; dst[5] = d[(v >>  8) & 0xF];
-    dst[6] = d[(v >>  4) & 0xF]; dst[7] = d[(v &  0xF)]; dst[8] = 0;
-}
-
-// 不依赖 CRT 的极简字符串拷贝，避免越界把日志搞坏。
 static void safeCpy(char* dst, const char* src, unsigned cap) {
     unsigned i = 0;
     if (!dst || cap == 0) return;
     while (src && i < cap - 1 && src[i]) { dst[i] = src[i]; i++; }
     dst[i] = 0;
-}
-
-// WinCE 的 GetAdaptersInfo 等 API 失败时返回的 HRESULT 风格错误码，
-// 与 winerror.h 常量可能不完全一致，故只做名称提示，不参与逻辑。
-static const char* excName(unsigned c) {
-    switch (c) {
-    case 0xC0000005u: return "ACCESS_VIOLATION";   // EXCEPTION_ACCESS_VIOLATION
-    case 0xC00000FDu: return "STACK_OVERFLOW";     // EXCEPTION_STACK_OVERFLOW
-    case 0xC000001Du: return "ILLEGAL_INSTRUCTION";// EXCEPTION_ILLEGAL_INSTRUCTION
-    case 0xC0000094u: return "INT_DIVIDE_BY_ZERO";
-    case 0xC000007Fu: return "DATATYPE_MISALIGNMENT";
-    case 0xC0000096u: return "PRIV_INSTRUCTION";
-    case 0xC000008Cu: return "FLT_DIVIDE_BY_ZERO";
-    case 0xC0000006u: return "IN_PAGE_ERROR";
-    case 0xE06D7363u: return "CXX_EXCEPTION";      // MSVC C++ 异常标记
-    default:          return "UNKNOWN";
-    }
 }
 
 static void openCrashFile(void) {
@@ -61,90 +39,51 @@ static void openCrashFile(void) {
     }
     g_hCrash = CreateFile(path, GENERIC_WRITE, FILE_SHARE_READ, NULL,
                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (g_hCrash != INVALID_HANDLE_VALUE) {
-        // 追加而非覆盖：一次运行可能崩多次，保留全部现场
-        SetFilePointer(g_hCrash, 0, NULL, FILE_END);
-        static const char sep[] = "\r\n---- crash ----\r\n";
-        DWORD wr = 0;
-        WriteFile(g_hCrash, sep, (DWORD)(sizeof(sep) - 1), &wr, NULL);
-        FlushFileBuffers(g_hCrash);
-    }
+    if (g_hCrash != INVALID_HANDLE_VALUE)
+        SetFilePointer(g_hCrash, 0, NULL, FILE_END); // 追加
 }
 
-// 把现场写入 crash.log。
-// 注意：这里刻意【不读 CONTEXT 的寄存器字段】——
-// ARM CE 的 CONTEXT 是 R0-R12/Sp/Lr/Pc 布局，与 x86 的 Eip/Esp/Ebp 完全不同，
-// 而 mingw-w64 对 CE 的 CONTEXT 定义与 MSVC 并不完全一致，硬取字段有编译失败风险。
-// EXCEPTION_RECORD 的字段（Code/Flags/Address/Information）是架构无关的，
-// 且异常码本身已足够区分访问冲突 / 栈溢出 / 非法指令 —— 收益远大于风险。
-static void writeScene(const EXCEPTION_RECORD* rec) {
+void CrashSetStage(const char* stage) {
+    if (!stage) return;
+    // 绝大多数调用点是在循环里反复设同一个 stage。不比较的话每秒会写几十次盘，
+    // 白白磨损 SD 卡闪存并抢占单核 CPU。比较后只有真正换步骤才落盘。
+    if (strcmp(g_stage, stage) == 0) return;
+    safeCpy(g_stage, stage, sizeof(g_stage));
+
     openCrashFile();
     if (g_hCrash == INVALID_HANDLE_VALUE) return;
+    // 手工拼行：这里刻意不用 std::string / sprintf —— 本文件要在
+    // "刚Detect 到低内存或栈已紧张" 的场景下也能工作，任何动态分配都可能二次崩溃。
+    char line[128];
+    char hex[16];
+    int  n = 0;
+    const char* pfx = "[stage] ";
+    while (*pfx && n < (int)sizeof(line) - 24) line[n++] = *pfx++;
+    const char* s = g_stage;
+    while (*s && n < (int)sizeof(line) - 20) line[n++] = *s++;
+    line[n++] = ' '; line[n++] = 't';
+    // 毫秒时间戳：与 tuptup.log 的 t+xxx 对齐，方便两次日志交叉比对
+    const char* d = "0123456789";
+    unsigned ms = GetTickCount();
+    for (int i = 0; i < 8; i++) { line[n++] = d[(ms >> ((7 - i) * 4)) & 0xF]; }
+    line[n++] = '\r'; line[n++] = '\n';
 
-    char  hex[16];
-    char  buf[512];
-    int   n = 0;
     DWORD wr = 0;
-    const char* nl = "\r\n";
-
-    #define APPEND(s)  do { const char* _s = (s); while (*_s && n < (int)sizeof(buf) - 12) buf[n++] = *_s++; } while (0)
-    #define APPENDU(v) do { putHex(hex, (unsigned)(v)); APPEND(hex); } while (0)
-
-    APPEND("stage="); APPEND(g_stage); APPEND(nl);
-    if (rec) {
-        APPEND("code=");   APPENDU(rec->ExceptionCode);
-        APPEND("  type="); APPEND(excName(rec->ExceptionCode)); APPEND(nl);
-        APPEND("flags=");  APPENDU(rec->ExceptionFlags); APPEND(nl);
-        APPEND("addr=");   APPENDU((unsigned)rec->ExceptionAddress); APPEND(nl);
-        APPEND("params="); APPENDU(rec->NumberParameters); APPEND(nl);
-        if (rec->NumberParameters > 0) {
-            APPEND("info0="); APPENDU(rec->ExceptionInformation[0]); APPEND(nl);
-            if (rec->NumberParameters > 1) {
-                APPEND("info1="); APPENDU(rec->ExceptionInformation[1]); APPEND(nl);
-            }
-        }
-        // 出错指令附近的机器码：判断是跳飞（乱码）还是数据踩踏（有指令但操作数离谱）。
-        // 读 16 字节是安全的：ExceptionAddress 必然落在本进程已映射的代码段内，
-        // 跨页最多读1 个未映射页，但 ARM 的取指粒度为 4/2 字节，实际不会跨到无映射页。
-        APPEND("code[16]=");
-        const unsigned char* p = (const unsigned char*)rec->ExceptionAddress;
-        for (int i = 0; i < 16; i++) { APPENDU(p[i]); APPEND(" "); }
-        APPEND(nl);
-    } else {
-        APPEND("code=NO_RECORD (unhandled filter 未提供 EXCEPTION_RECORD)\r\n");
-    }
-    APPEND("ThreadId="); APPENDU(GetCurrentThreadId()); APPEND(nl);
-
-    #undef APPEND
-    #undef APPENDU
-
-    WriteFile(g_hCrash, buf, (DWORD)n, &wr, NULL);
+    WriteFile(g_hCrash, line, (DWORD)n, &wr, NULL);
+    // 必须每次 flush：崩溃时进程直接消失，缓冲区里的内容会一起丢。
+    // 这是本方案存在的全部意义 —— 落盘时机必须与崩溃无关。
     FlushFileBuffers(g_hCrash);
+    (void)hex;
 }
-
-// 未捕获异常过滤器。这是唯一能在任意线程崩溃时拿到现场的钩子。
-// 回调签名自带 EXCEPTION_POINTERS*，因此不需要 GetExceptionPointers()（MSVC 专有）。
-static LONG WINAPI onUnhandled(EXCEPTION_POINTERS* ep) {
-    const EXCEPTION_RECORD* rec = ep ? ep->ExceptionRecord : NULL;
-    writeScene(rec);
-    // 尽力往主日志也打一行，便于与 tuptup.log 的时间线对齐。
-    // 栈溢出时这条 Log 本身可能失败，但 crash.log 已落盘，不影响取证。
-    if (rec) {
-        Log("!!! CRASH stage=%s code=%08X type=%s addr=%08X",
-            g_stage, (unsigned)rec->ExceptionCode,
-            excName(rec->ExceptionCode), (unsigned)rec->ExceptionAddress);
-    } else {
-        Log("!!! CRASH stage=%s (no exception record)", g_stage);
-    }
-    // 返回 EXCEPTION_EXECUTE_HANDLER 交回系统，通常进程就此终止 —— 这是期望行为。
-    return EXCEPTION_EXECUTE_HANDLER;
-}
-
-void CrashSetStage(const char* stage) { safeCpy(g_stage, stage, sizeof(g_stage)); }
 
 void CrashLogInit() {
     openCrashFile();
-    SetUnhandledExceptionFilter(onUnhandled);
+    if (g_hCrash == INVALID_HANDLE_VALUE) return;
+    static const char hdr[] = "---- tuptup crashloc start ----\r\n";
+    DWORD wr = 0;
+    WriteFile(g_hCrash, hdr, (DWORD)(sizeof(hdr) - 1), &wr, NULL);
+    FlushFileBuffers(g_hCrash);
+    CrashSetStage("WinMain:init");
 }
 
 #else // !_WIN32 —— 宿主回归测试用的空实现

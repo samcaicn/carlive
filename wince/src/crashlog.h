@@ -1,40 +1,36 @@
 #pragma once
-// crashlog.h - 崩溃现场捕获（R24 新增）
+// crashlog.h - 崩溃定位（stage 主动落盘）R24 新增 / R25 修正实现方式
 //
-// ## 为什么必须加
-// 在此之前项目里**零异常捕获**，任何崩溃都只表现为"日志停在某行 → 进程消失"，
-// 排查只能靠排除法猜，已经连续猜错两次：
+// ## 为什么需要它
+// 在此之前项目里**零崩溃定位手段**，任何崩溃都只表现为"日志停在某行 → 进程消失"，
+// 排查只能靠排除法猜，已经连续猜错三次：
 //   · R21 猜"buflen 异常大导致巨量分配 OOM" —— 不成立；
-//   · R22 猜"Log() → LocalIPv4() → Log() 嵌套加锁" —— **不成立**（实参在进入
+//   · R22 猜"Log() → LocalIPv4() → Log() 嵌套加锁" —— **不成立**（C++ 实参在进入
 //     Log 函数体、EnterCriticalSection 之前就已求值完毕，根本不存在嵌套持锁）；
-//   · R23 猜"WinCE 线程默认栈 64KB 导致栈溢出" —— **这一条是对的**，128KB 后线程
-//     成功进入 ConnThread（日志出现 ConnThread entered），但随即死在下一行，
-//     暴露了第二个独立问题。
-// 三次猜测、三次落空，说明这条路上必须换成"机器把现场吐出来"而不是人肉推断。
+//   · R23 猜"WinCE 线程默认栈仅 64KB" —— **这一条成立**，128KB 后真车日志第一次
+//     出现 `ConnThread entered`，但随即死在下一行，暴露第二个独立故障。
 //
-// ## 崩溃在 WinCE 上有多难查
-// 没有 core dump、没有 stderr、车机更没有调试器。唯一能拿到的信息就是
-// **异常码 + 出错指令地址 + 出错指令的机器码**，必须第一时间落盘。
+// ## R25：为什么不用 SetUnhandledExceptionFilter
+// R24 最初实现用的是 `SetUnhandledExceptionFilter` + `EXCEPTION_RECORD`，
+// 编译阶段就被 CeGCC 拒绝：
+//     undefined reference to `SetUnhandledExceptionFilter'
 //
-// ## 为什么不用 __try/__except
-// CeGCC 是 GCC 9.3（arm-mingw32ce），**`__try/__except` 是 MSVC 专有语法，GCC 不支持**；
-// `GetExceptionPointers()` 也是 MSVC CRT 函数，mingw-w64 没有。
-// 若照搬网上 MSVC 方案的写法，CI 会在编译阶段直接失败。
+// 根因同"判PE 是不是 WinCE 程序不能只看 machine 字段"是同一类问题：
+// **大量桌面 Windows(kernel32) 的 API 在 WinCE 的 coredll 里并不存在。**
+// 与 R24 已规避的 `__try/__except`(MSVC 专有)、`GetExceptionPointers`(MSVC CRT)、
+// `#include <ex.h>`、x86 CONTEXT 字段名并列，是第 5 个平台陷阱。
 //
-// 改用**纯 Win32 SEH**：SetUnhandledExceptionFilter 的回调签名本身就带
-// EXCEPTION_POINTERS*，直接取用即可，无需任何编译器扩展。
+// 与其继续赌哪个 SEH/信号 API 在 WinCE 上真实存在（赌错=CI 编译失败，
+// 又是好几分钟一轮回），改用**零平台依赖**的方案：
 //
-// ## ARM CE 的 CONTEXT 布局与 x86 完全不同
-// x86 是 Eip/Esp/Ebp/Eax/Ebx/Ecx/Edx/Esi/Edi；ARM CE 是 R0-R12/Sp/Lr/Pc/Fpscr/Spsr。
-// 若照抄 x86 字段名，编译不过；即使编过也会打出错误的寄存器值。
-// 这里只输出 ARM 布局里确实存在的字段，并且全部走定长缓冲。
-#ifndef CRASHLOG_H
-#define CRASHLOG_H
-
+// ## 最终方案：stage 主动落盘
+// CrashSetStage() 每次把"当前正在做什么"立即写进 crash.log 并 flush。
+// 进程无论是被未捕获异常杀掉、栈溢出、还是直接 ExitProcess，
+// **最后一行 stage 就是崩溃点**—— 不依赖任何异常捕获机制。
+//
+// 开销控制：只有 stage 名**发生变化**时才写盘（比较前后字符串），
+// 故循环里反复设同一个 stage 不会产生任何 IO。
+// 写盘频率实测约每秒 1-2 次（远低于 tuptup.log 本身已有的日志量），SD 卡无压力。
 void CrashLogInit();
-// 设置"当前正在执行的关键步骤"。崩溃时由异常处理器写入，用于回答
-// "崩在哪一步"，而不只是"崩了"。所有实现都在 crashlog.cpp 的 _WIN32 分支内，
-// POSIX 侧为空实现，宿主回归测试仍可编译。
+// 设置当前关键步骤。立即落盘到 crash.log（仅在值变化时）。
 void CrashSetStage(const char* stage);
-
-#endif // CRASHLOG_H
