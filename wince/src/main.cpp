@@ -13,6 +13,7 @@
 #include <windows.h>
 #include <process.h>
 #include <stdio.h>
+#include <string.h>   // R28：WToACharBuf 与 Log 的窄字符缓冲用到 strcpy/memset，显式引入避免依赖间接包含
 #include <string>
 #include <vector>
 
@@ -43,6 +44,65 @@ static std::wstring A2W(const char* s) {
 }
 
 static wchar_t g_statusText[128] = L"tuptup.top 车机投屏 · 等待手机";
+
+// R28：Windows C 库的 %ls/%S 在 CeGCC(mingw32ce) 下没有保证，宽字符串一律先转窄再交给 Log。
+// 非 ASCII 字符统一降级成 '?',宁可读不懂也不让格式串把进程带崩（这是当前排障期的第一原则）。
+static void WToACharBuf(const WCHAR* w, char* a, unsigned cap) {
+    unsigned i = 0;
+    if (!a || cap == 0) return;
+    while (w && w[i] && i < cap - 1) {
+        unsigned short v = (unsigned short)w[i];
+        a[i] = (v < 0x80) ? (char)v : '?';
+        i++;
+    }
+    a[i] = 0;
+}
+
+// R28 关键修复：单实例互斥名必须**按 EXE 自身路径**派生，不能写死。
+//
+// 背景：WinMain 开头的 CreateMutex 用的是固定名 "Tuptup_Mirror_SingleInstance"。
+// 这在单车机上没毛病，但只要 SD 卡上放着多个 exe 做 A/B 对比（R27 的三个版本），
+// 就会变成致命误导：上一个 exe 若没彻底退出（车机按 HOME 切走、进程残留、
+// 上次崩溃后句柄未回收），下一个 exe 一进来就 ERROR_ALREADY_EXISTS 然后静默 return 2，
+// 窗口根本不创建 —— 现象与"启动即闪退、连画面都没有"**完全一样**，
+// 排障会被彻底带偏（历史上几次"闪退"很可能就是它，而不是代码逻辑崩了）。
+//
+// 修法：互斥名带上模块完整路径：
+//   · 同一个 exe 连开两次 → 路径相同 → 仍然被拦住（保留原有的双开保护）
+//   · 不同 exe 同处一张 SD 卡 → 路径不同 → 互不干扰（A/B 对比得以成立）
+//   · 旧版 GLOAI/tuptup.exe 仍是老名 → 与新版天然不冲突，新旧可同时比对
+// 分隔符/冒号/点统一换成下划线：不同 ROM 对内核对象名里低反斜杠的容忍度不一致，
+// 换成 '_' 是唯一对所有 WinCE 版本都安全的写法。
+static void BuildSingleInstanceName(WCHAR* out, DWORD cap) {
+    const WCHAR* pfx = L"Tuptup_SI_";
+    unsigned n = 0;
+    while (pfx[n] && (DWORD)n < cap - 1) { out[n] = pfx[n]; n++; }
+    WCHAR path[MAX_PATH];
+    memset(path, 0, sizeof(path));
+    if (GetModuleFileName(NULL, path, MAX_PATH)) {
+        for (unsigned i = 0; path[i] && (DWORD)n < cap - 1; i++) {
+            WCHAR c = path[i];
+            if (c == L'\\' || c == L'/' || c == L':' || c == L'.') c = L'_';
+            out[n++] = c;
+        }
+    } else {
+        const WCHAR* fb = L"unknown_module";
+        for (unsigned i = 0; fb[i] && (DWORD)n < cap - 1; i++) out[n++] = fb[i];
+    }
+    out[n] = 0;
+}
+
+// R28：变体标记。SD 卡上三个 exe 界面长得一模一样，车机上跑起来根本分不清
+// 当前到底在跑哪个 —— 一旦混着测，回来的日志对不上exe，实验等于白做。
+// 把标记打进窗口标题与状态首屏，人眼一眼可辨。
+#ifdef USB_NET_ONLY
+static const char*  EXE_TAG  = "usbnet";
+static const WCHAR* EXE_TAGW = L"usbnet";
+#else
+static const char*  EXE_TAG  = "full";
+static const WCHAR* EXE_TAGW = L"full";
+#endif
+
 static CRITICAL_SECTION g_csStatus;   // 保护 g_statusText：连接线程写、GUI 线程读，避免读到撕裂文本
 static volatile bool g_hasFrame = false;
 // resetFrame=true（默认）：非镜像态(连接中/断开/扫描)应清帧改显示文字；
@@ -64,7 +124,16 @@ static void SetStatus(const wchar_t* s, bool resetFrame = true) {
         size_t cutCR = first.find(L'\r');
         if (cutCR != std::wstring::npos && (cut == std::wstring::npos || cutCR < cut)) cut = cutCR;
         if (cut != std::wstring::npos) first.resize(cut);
-        SetWindowText(g_hwnd, first.c_str());
+        // R28：标题栏带上变体标记 [full] / [usbnet]。
+        // SD 卡上多个 exe 的界面完全一样，车机屏幕上如果只看得到
+        // "tuptup.top 车机投屏 · 等待手机"，根本分不清现在跑的是哪一个 ——
+        // 拔卡回来看到三份日志却对不上哪份对应哪次运行，A/B 对比就废了。
+        // 只改标题栏，客户区的多行排障提示保持原样。
+        std::wstring titled = L"[";
+        titled += EXE_TAGW;
+        titled += L"] ";
+        titled += first;
+        SetWindowText(g_hwnd, titled.c_str());
         InvalidateRect(g_hwnd, NULL, FALSE);
     }
 }
@@ -667,16 +736,66 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
     // 此前连续三次闪退（R21/R22/R23）都只能靠排除法猜，猜错三次。
     CrashLogInit();
     CrashSetStage("WinMain:init");
+    InitializeCriticalSection(&g_csStatus);
+    Log("WinMain enter");
+    Log("build %s %s variant=%s", __DATE__, __TIME__, EXE_TAG);   // R11：启动日志带构建时间，排障先对版本
+    // R28：把"这次到底是从哪个路径被启动的"写进日志。
+    // SD 卡上的 exe 可能被改名、被挪到别的目录、或车机实际加载的是另一张卡上的旧副本，
+    // 没有这行就无法确认车机跑的真的是我以为的那个文件（A/B 对比的前提条件）。
+    {
+        WCHAR path[MAX_PATH] = {0};
+        char  apath[MAX_PATH];
+        memset(apath, 0, sizeof(apath));
+        if (GetModuleFileName(NULL, path, MAX_PATH)) WToACharBuf(path, apath, sizeof(apath));
+        else  strcpy(apath, "<GetModuleFileName failed>");
+        Log("exe path = %s", apath);
+    }
+    // R28：启动时打印可用物理内存。WinCE 车机是固定内存 + 常驻导航进程的封闭环境，
+    // "某个版本闪退"很可能是它在 RAM 紧张时段恰好要开更大窗口/更大解码缓冲，
+    // 而旧版在同一时刻因为占用小而侥幸通过 —— 有了这行的前后对比才能区分
+    // "代码问题"与"资源问题"。成本极低（一次系统调用），但能省掉一轮猜测。
+    {
+        MEMORYSTATUS ms;
+        memset(&ms, 0, sizeof(ms));
+        ms.dwLength = sizeof(ms);
+        GlobalMemoryStatus(&ms);
+        Log("mem: totalPhys=%uKB availPhys=%uKB totalePage=%uKB",
+            (unsigned)((ms.dwTotalPhys  + 1023) / 1024),
+            (unsigned)((ms.dwAvailPhys  + 1023) / 1024),
+            (unsigned)((ms.dwTotalPageFile + 1023) / 1024));
+    }
+
     // R10：单实例保护。双开会让两份 ConnThread 同时连手机、触摸双发、信标端口/日志互踩。
-    HANDLE hSingle = CreateMutex(NULL, TRUE, TEXT("Tuptup_Mirror_SingleInstance"));
+    // R28：互斥名改为按 EXE 路径派生（详见 BuildSingleInstanceName 的说明），
+    //      并且**不再静默退出** —— 旧写法 return 2 连窗口都不建，现象跟"闪退"一模一样，
+    //      排障时会被当成崩溃去查，白白绕远路。
+    WCHAR  szMutexName[MAX_PATH + 16] = {0};
+    BuildSingleInstanceName(szMutexName, MAX_PATH + 16);
+    HANDLE hSingle = CreateMutex(NULL, TRUE, szMutexName);
     if (!hSingle || GetLastError() == ERROR_ALREADY_EXISTS) {
-        Log("already running -> exit (single instance guard)");
+        char amutex[MAX_PATH + 16];
+        memset(amutex, 0, sizeof(amutex));
+        WToACharBuf(szMutexName, amutex, sizeof(amutex));
+        Log("already running -> exit (single instance guard), mutex=%s", amutex);
+        // 必须给出可见反馈：否则用户只看到"点了没反应"，与真闪退无法区分。
+        // 标志做成"缺哪个宏就自动降级"：不同版本 WinCE 的 winuser.h 对
+        // MB_SETFOREGROUND / MB_TOPMOST 的定义并不一致，硬写会让 CI 直接编译失败，
+        // 而为了一个提示框多吃一轮 CI 完全不划算。
+#ifndef MB_SETFOREGROUND
+#define MB_SETFOREGROUND 0
+#endif
+#ifndef MB_TOPMOST
+#define MB_TOPMOST 0
+#endif
+        MessageBox(NULL,
+            TEXT("tuptup.top 已在运行（或上次没有完全退出）。\r\n")
+            TEXT("请先彻底退出后再启动本程序。\r\n\r\n")
+            TEXT("若反复出现，请用任务管理器结束残留进程。"),
+            TEXT("tuptup.top 单实例保护"),
+            MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST);
         if (hSingle) CloseHandle(hSingle);
         return 2;
     }
-    InitializeCriticalSection(&g_csStatus);
-    Log("WinMain enter");
-    Log("build %s %s (R13)", __DATE__, __TIME__);   // R11：启动日志带构建时间，排障先对版本
 
     // R14：崩溃定位哨兵。实测车机上日志只有启动横幅就断了，说明进程在 WinMain 早期
     // （窗口创建/消息泵之前）就死了，而那阶段日志全在缓冲区没落盘，什么都看不到。
