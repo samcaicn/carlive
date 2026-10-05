@@ -21,10 +21,10 @@ qemu-test/*.png
 qemu-test/*.ppm
 qemu-test/images/*.png
 qemu-test/images/*.ppm
-qemu-test/images/stage2/
-qemu-test/images/stage3/
+# 沙箱灌盘用的 exe 副本（真正的交付物只有 wince/tuptup.exe，由 CI 现场编译）
+qemu-test/stage/
 qemu-test/stage3/
-qemu-test/stage/gloai/GLOAI.exe
+qemu-test/images/stage*/
 
 # 签名密钥与口令：绝不入仓，只在 CI 由 secrets 注入
 android/key.properties
