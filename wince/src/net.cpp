@@ -132,11 +132,14 @@ void NetClient::sendControl(BYTE code) { sendMsg(0x05, &code, 1); }
 bool NetClient::sendHeartbeat() { BYTE b=0; return sendMsg(0x06, &b, 1); }
 
 bool NetClient::readExact(BYTE* buf, int n) {
+    // 防御：未建连（m_transport 为 NULL）时直接失败，避免空指针解引用。
+    if (!m_transport) return false;
     // ITransport::read() 已实现“精确读满 n 字节或断链返回 false”，无需上层续读。
     return m_transport->read(buf, n);
 }
 
 bool NetClient::readMsg(BYTE& type, std::vector<BYTE>& payload) {
+    if (!m_transport) return false;   // 防御：未建连时直接失败
     BYTE magic[4];
     if (!readExact(magic, 4)) return false;
     if (magic[0]!=MAGIC[0]||magic[1]!=MAGIC[1]||magic[2]!=MAGIC[2]||magic[3]!=MAGIC[3]) {
@@ -193,7 +196,7 @@ bool NetClient::recvVideoFrame(VideoFrame& out) {
             if (dlen > MAX_FRAME_BYTES) { Log("recvVideoFrame: 单帧过大 %d 字节，跳过", dlen); continue; }
             // 反压：若内核收包缓冲仍堆积大量数据，说明本端解码跟不上发送节奏，
             // 直接丢弃本帧继续读下一帧（取最新），避免无意义解码与内存拷贝。
-            int backlog = m_transport->backlog();
+            int backlog = m_transport ? m_transport->backlog() : 0;
             if (backlog > 96*1024) {
                 continue;
             }
@@ -313,6 +316,12 @@ static void AddInterfaceGateways() {
             }
         }
     }
+}
+
+// 关闭 Nagle：探测/连接阶段小包（SYN 探测、握手首包）要立刻发出，不能等凑批，否则首连延迟被放大。
+static void setNoDelay(SOCKET s) {
+    int one = 1;
+    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
 }
 
 // 对单个 IP 的 8686 端口做快速 TCP 探测：开放返回 true。超时短，避免拖慢连接。

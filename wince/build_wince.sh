@@ -20,6 +20,7 @@ echo ">> building $OUT"
   "$SCRIPT_DIR/src/main.cpp" \
   "$SCRIPT_DIR/src/net.cpp" \
   "$SCRIPT_DIR/src/adb.cpp" \
+  "$SCRIPT_DIR/src/rsa.cpp" \
   "$SCRIPT_DIR/src/tcptransport.cpp" \
   "$SCRIPT_DIR/src/renderer.cpp" \
   "$SCRIPT_DIR/src/decoder.cpp" \
