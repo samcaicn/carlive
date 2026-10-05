@@ -7,6 +7,7 @@
 #include "renderer.h"
 #include "decoder.h"
 #include "log.h"
+#include "thread.h"
 
 #include <windows.h>
 #include <process.h>
@@ -251,18 +252,20 @@ static bool HasIPIn(const std::vector<std::string>& v, const std::string& ip) {
 }
 
 static DWORD WINAPI ConnThread(LPVOID) {
+    // R23 存活哨兵：这是本线程的第一条语句。若日志出现它，说明线程成功启动、
+    // 且栈没有在入口就溢出。历史上真车日志稳定停在本行**之前**（discovery started），
+    // 即线程一创建就死—— 根因是 WinCE 忽略 dwStackSize、默认栈仅 64KB。
+    Log("[stage] ConnThread entered");
     int failRounds = 0;   // 连续连接失败轮次（用于退避，成功即清零）
     std::string cfg = readConfig();
     if (g_cfgMode != NetClient::GetMode()) NetClient::SetMode(g_cfgMode);
     // R16：把本机实际网段打进启动日志。网段问题排查的第一步就是确认"车机到底在哪个网段"，
     // 旧版日志里没有这条，导致只能靠猜（实测踩了 6.8 小时）。
     //
-    // R22 关键修复：**LocalIPv4() 不再作为 Log() 的参数内联求值**。
-    // 它内部会调 GetAdaptersInfo，而 R21 在该链路里放了 Log() —— 于是形成
-    // "Log(参数)→ LocalIPv4() → Log() → EnterCriticalSection(同一把 g_csLog)"
-    // 的嵌套加锁 + g_lastMsg 节流状态机重入竞态。
-    // 真车实测后果：日志稳定停在 `discovery started`，`ConnThread start` 一行都没有，
-    // 崩溃点比修复前**更早**。先取到字符串再打日志，彻底断开这条链。
+    // R22 曾把这里写成Log(..., LocalIPv4().c_str()) 并归因为"嵌套加锁导致闪退"——
+    // 该归因是错的：C++ 实参在进入 Log 函数体、EnterCriticalSection 之前就已求值完毕，
+    // 不存在嵌套持锁。真正的崩溃是线程栈溢出（见 thread.h），已由 TltpCreateThread 修复。
+    // 这里保持"先取值再打日志"的写法（更易读，且避免把 GetAdaptersInfo 塞进实参列表）。
     std::string localIP = NetClient::LocalIPv4();
     Log("ConnThread start, configIP='%s' port=%d mode=%s localIP=%s",
         cfg.c_str(), g_cfgPort, NetClient::ModeName(), localIP.c_str());
@@ -382,8 +385,8 @@ static DWORD WINAPI ConnThread(LPVOID) {
         //   LastRecvTick 计算静默时长，进门就误判"对端静默超时"而立刻断链。
         NetClient::ResetRecvTick();
 
-        HANDLE hRecv = CreateThread(NULL, 0, RecvThread, NULL, 0, NULL);
-        HANDLE hHb   = CreateThread(NULL, 0, HeartbeatThread, NULL, 0, NULL);
+        HANDLE hRecv = TltpCreateThread(RecvThread, NULL);
+        HANDLE hHb   = TltpCreateThread(HeartbeatThread, NULL);
 
         // 等待断线（对端关闭 或 心跳连续失败）。连上后若 6s 内未收到任何视频帧，
         // 明确提示“手机未发送画面”（多为 tuptup.top App 未授权录屏/未在前台），避免用户
@@ -709,9 +712,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
     Log("discovery started");
 
     // 连接管理放到后台线程，主线程只跑消息泵 → 窗口可正常绘制/关闭，不再“启动卡死”
-    // R22：补CreateThread 失败检查。此前失败会静默无日志 → 界面正常但永远不连，
+    // R23 关键修复：显式保留 128KB 线程栈（WinCE 忽略 dwStackSize，默认只有 64KB，
+    // ConnThread 栈上有多个 std::string/std::vector，一进去就溢出→ 进程瞬间消失，
+    // 日志恰好停在上一行 "discovery started"。详见 thread.h 的完整说明。
+    // R22：补 CreateThread 失败检查。此前失败会静默无日志 → 界面正常但永远不连，
     // 与"启动即闪退"症状混淆，排障方向被带偏。
-    g_hConnThread = CreateThread(NULL, 0, ConnThread, NULL, 0, NULL);
+    g_hConnThread = TltpCreateThread(ConnThread, NULL);
     if (!g_hConnThread) Log("FATAL: ConnThread CreateThread 失败 (err=%u), 仅界面运行", (unsigned)GetLastError());
     else Log("ConnThread created");
 

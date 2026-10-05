@@ -3,6 +3,7 @@
 #include "log.h"
 #include "tcptransport.h"
 #include "adb.h"
+#include "thread.h"
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 #include <cstring>
@@ -326,26 +327,25 @@ static bool parseIPv4(const char* s, unsigned out[4]) {
 // 用途：config.txt 里写死的 IP 只有落在本机任一网卡子网内才值得优先尝试；
 // 否则它属于别的网段（典型：手机换网络后 IP 段整个变了），留着只会每轮白等一个超时，
 // 并把真正的自动发现候选挤到后面 —— 实测这就是"日志刷 6.8 小时、全是同一个死 IP"的根因。
-// R21 崩溃修复（2026-10-05 真车实测闪退）：真机日志稳定停在 `ConnThread start`，
-// 下一条 `first GetCandidates` 从未出现 → 进程死在 LocalIPv4()/GetCandidates() 里的
-// GetAdaptersInfo 路径上。沙箱 CE7 无网卡走的是"调用直接失败"分支，所以复现不出来；
-// 真机 CE6 有网卡，buflen 由内核填入，若该值异常大（脏数据/结构版本不匹配），
-// `std::vector<BYTE> buf(buflen)` 会一次巨量分配 → 单核 64MB 车机上立刻 OOM 闪退。
-// 三重防御：① buflen 上限封顶（IP_ADAPTER_INFO 链正常几百字节，给 64KB 余量足够）；
-// ② 分配失败不抛异常直接返回；③ 分配后 memset 清零，避免未初始化结构里的 Next 野指针。
+//
+// R21 曾把这里的 buflen 上限当作"启动即闪退"的修复并归因于巨量分配 OOM，
+// R22 又把崩溃归因于"Log()嵌套加锁"—— **这两个归因都是错的**（见 thread.h）：
+//   · 真正原因是 WinCE 忽略 CreateThread 的 dwStackSize、线程默认栈仅 64KB，
+//     ConnThread 一进函数就栈溢出，进程瞬间消失，位置恰好在 discovery 日志之后；
+//   · "Log(参数)→LocalIPv4()→Log()"也不存在嵌套持锁：实参在 EnterCriticalSection
+//     之前就求值完了。
+// 但 R21 加的三重防御本身是**有价值且应保留**的：buflen 上限封顶（防脏数据导致巨量分配）、
+// resize 包 try/catch（防异常逃逸线程）、分配后 memset清零（防未初始化结构里的 Next 野指针）。
 static ULONG AdapterBufLen(ULONG* out) {
     ULONG need = 0;
     *out = 0;
     ULONG rc = GetAdaptersInfo(NULL, &need);
     if (need == 0) return rc;
     if (need > 64 * 1024) {
-        // R22：这里【绝不能调 Log()】。本函数会被 LocalIPv4() 调用，而 LocalIPv4() 又是
-        // main.cpp 里 Log("ConnThread start,...localIP=%s", ..., LocalIPv4().c_str()) 的
-        // **参数表达式** —— 即在 Log() 尚未 EnterCriticalSection 时，内层又要抢同一把 g_csLog
-        // 并改写节流用的 g_lastMsg/g_lastSameTick，构成重入竞态。
-        // 实测后果（R21 真车 6 次）：日志稳定停在 `discovery started`，`ConnThread start`
-        // 一行都没有 —— 崩溃点比 R20 更早，说明本函数本身就是新引入的崩溃源。
-        // 改为置标志，由调用点在自身安全位置（已经进入 Log 或主循环）统一上报。
+        // R22：这里【绝不能调 Log()】。本函数会被 LocalIPv4() 调用，
+        // 而 LocalIPv4() 又在 ConnThread 栈上。加锁本身不是问题（实参求值早于加锁），
+        // 但网卡枚举路径里做文件 IO 会放大栈压力，在 64KB 栈上属于雪上加霜。
+        // 改为置标志，由调用点在安全位置统一上报。
         g_adaptBufTooBig = need;
         return ERROR_BUFFER_OVERFLOW;
     }
@@ -486,6 +486,10 @@ static bool probePort(unsigned a, unsigned b, unsigned c, unsigned d, int timeou
 //          且每地址 Sleep(8) 节流，避免 254 次探测把 CPU 占满导致系统卡死。
 //   每轮扫描后 Sleep(5000)，不空转。链路已连上时整段暂停。
 static DWORD WINAPI SubnetScanThread(LPVOID) {
+    // R23 存活哨兵：本线程第一条语句。见 thread.h —— WinCE 线程默认栈仅 64KB，
+    // 栈上要放 std::vector<BYTE> buf 并调 GetAdaptersInfo/probePort/sscanf，
+    // 64KB 会溢出并连带杀掉整个进程。真车日志曾稳定停在本行之前。
+    Log("[stage] SubnetScanThread entered");
     while (g_discoveryOn) {
         if (g_linkUp) { Sleep(1000); continue; }   // 已连上：暂停扫描，不浪费资源/不打扰手机
 
@@ -564,6 +568,8 @@ static DWORD WINAPI SubnetScanThread(LPVOID) {
 }
 
 static DWORD WINAPI DiscoveryThread(LPVOID) {
+    // R23 存活哨兵：本线程第一条语句。见 thread.h（WinCE 默认栈仅 64KB）。
+    Log("[stage] DiscoveryThread entered");
     SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s == INVALID_SOCKET) { Log("disc: 创建 UDP socket 失败 (WSA=%d)，信标发现不可用", WSAGetLastError()); return 0; }
     BOOL reuse = 1;
@@ -783,8 +789,12 @@ void NetClient::StartDiscovery() {
     if (g_discoveryOn) return;
     LoadKnownPhones();   // 启动时读取“记住的手机”，供本轮回合优先直连
     g_discoveryOn = true;
-    g_hDiscThread = CreateThread(NULL, 0, DiscoveryThread, NULL, 0, NULL);
-    g_hScanThread = CreateThread(NULL, 0, SubnetScanThread, NULL, 0, NULL);
+    // R23：走 TltpCreateThread 显式保留 128KB 栈。WinCE 忽略 CreateThread 的
+    // dwStackSize（默认只有 64KB），而这两个探测线程栈上要放 std::vector<BYTE> buf
+    // 等对象并调用 GetAdaptersInfo/probePort/sscanf，64KB 会溢出。
+    // 症状同样是"进程瞬间消失、日志停在StartDiscovery 之前"。
+    g_hDiscThread = TltpCreateThread(DiscoveryThread, NULL);
+    g_hScanThread = TltpCreateThread(SubnetScanThread, NULL);
 }
 
 void NetClient::StopDiscovery() {

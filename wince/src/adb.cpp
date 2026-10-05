@@ -10,6 +10,7 @@
 #include "rsa.h"
 #include "adbkey.h"
 #include "log.h"
+#include "thread.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -410,7 +411,9 @@ bool AdbTransport::connect(const std::wstring& host, int /*port*/, int timeoutMs
     m_running = true;
     m_remoteWindow = (long)m_adbMaxData;
 #ifdef _WIN32
-    m_readThread = CreateThread(NULL, 0, ReadPumpThunk, this, 0, NULL);
+    // R23：走 TltpCreateThread 显式保留 128KB 栈（WinCE 默认仅 64KB，
+    // 读泵里 RSA/缓冲区处理会溢出）。详见 thread.h。
+    m_readThread = TltpCreateThread(ReadPumpThunk, this);
     if (!m_readThread) { Log("adb: 创建读泵线程失败"); close(); return false; }
 #else
     if (pthread_create(&m_readThread, NULL, ReadPumpThunk, this) != 0) {

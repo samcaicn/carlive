@@ -101,9 +101,21 @@ def main():
     stale = sorted(set(remote) - set(local))
     for p in stale:
         print(f"  D  {p}")
-    if not stale:
-        print("无残留，无需处理")
+
+    # R22 修复：原先只看"远端多出的文件"（stale），内容不同但文件数相同的普通提交
+    # 会被判成"无残留，无需处理"而直接 return —— 于是调用方以为推送成功，
+    # 实际远端一个字节都没变。实测踩过：R22 只改net.cpp/main.cpp 两个已有文件，
+    # 文件数不变（78 == 78），脚本静默跳过，GitHub 上仍是旧代码，CI 照旧构建旧版。
+    # 现在同时比对同名文件的 blob sha，任何差异都视为"需要推送"。
+    changed = sorted(p for p in set(local) & set(remote) if local[p] != remote[p])
+    for p in changed:
+        print(f"  M  {p}  {remote[p][:9]} -> {local[p][:9]}")
+
+    if not stale and not changed:
+        print("远端与本地完全一致，无需处理")
         return
+    if not stale:
+        print(f"无残留文件，但有 {len(changed)} 个文件内容不同，继续推送")
 
     # 复用远端已有 blob 的 sha（内容相同 sha 就相同），只上传远端没有的
     remote_sha_set = set(remote.values())
@@ -127,16 +139,20 @@ def main():
 
     name, _, mail = author.partition(" <")
     who = {"name": name, "email": mail.rstrip(">"), "date": when}
+    if stale:
+        head = (f"chore: 清理远端 tree 历史残留（{len(stale)} 个已删除文件）\n\n"
+                f"filter-repo 后增量推送的 base_tree 残留导致 CI 把旧包名源码\n"
+                f"com/gloai/mirror/*.kt 当活跃代码编译，Android 构建失败。\n"
+                f"本次用不带 base_tree 的全量 tree 覆盖，历史不变。")
+    else:
+        head = f"chore: 同步 {len(changed)} 个文件的内容变更\n\n用不带 base_tree 的全量 tree 覆盖，历史不变。"
     commit = gh("POST", f"/repos/{REPO}/git/commits", {
-        "message": f"chore: 清理远端 tree 历史残留（{len(stale)} 个已删除文件）\n\n"
-                   f"filter-repo 后增量推送的 base_tree 残留导致 CI 把旧包名源码\n"
-                   f"com/gloai/mirror/*.kt 当活跃代码编译，Android 构建失败。\n"
-                   f"本次用不带 base_tree 的全量 tree 覆盖，历史不变。\n\n{msg}",
+        "message": f"{head}\n\n{msg}",
         "tree": tree, "parents": [parent],
         "author": who, "committer": who,
     })["sha"]
     gh("PATCH", f"/repos/{REPO}/git/refs/heads/{BRANCH}", {"sha": commit, "force": True})
-    print(f"\n✓ {BRANCH} -> {commit}  清理 {len(stale)} 个残留文件")
+    print(f"\n✓ {BRANCH} -> {commit}  清理 {len(stale)} 个残留，更新 {len(changed)} 个文件")
 
 
 if __name__ == "__main__":
