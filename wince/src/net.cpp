@@ -338,20 +338,29 @@ static bool parseIPv4(const char* s, unsigned out[4]) {
 // 但 R21 加的三重防御本身是**有价值且应保留**的：buflen 上限封顶（防脏数据导致巨量分配）、
 // resize 包 try/catch（防异常逃逸线程）、分配后 memset清零（防未初始化结构里的 Next 野指针）。
 static ULONG AdapterBufLen(ULONG* out) {
+    // R26：这行之前没有任何打点 —— 它是网卡枚举路径上第一条真正执行的 Win32 调用。
+    // 若崩溃发生在 GetAdaptersInfo 首次调用内部，crash.log 会停在上一个调用点的stage
+    // 上（看起来像"崩在 readConfig"），把排查范围误导回完全无关的函数。
+    CrashSetStage("AdapterBufLen:GetAdaptersInfo1");
     ULONG need = 0;
     *out = 0;
-    ULONG rc = GetAdaptersInfo(NULL, &need);
-    if (need == 0) return rc;
+    GetAdaptersInfo(NULL, &need);   // 返回值刻意丢弃，理由见下
+    if (need == 0) return ERROR_BUFFER_OVERFLOW;   // 确实无网卡/驱动不可用
     if (need > 64 * 1024) {
-        // R22：这里【绝不能调 Log()】。本函数会被 LocalIPv4() 调用，
-        // 而 LocalIPv4() 又在 ConnThread 栈上。加锁本身不是问题（实参求值早于加锁），
-        // 但网卡枚举路径里做文件 IO 会放大栈压力，在 64KB 栈上属于雪上加霜。
+        // R22 起：这里【绝不能调Log()】。网卡枚举路径上做文件 IO 会放大栈压力。
         // 改为置标志，由调用点在安全位置统一上报。
         g_adaptBufTooBig = need;
         return ERROR_BUFFER_OVERFLOW;
     }
+    // R26 关键修正：原实现 `return rc`（GetAdaptersInfo 的真实返回值），
+    // 而四个调用点全部按 `rc != ERROR_BUFFER_OVERFLOW` 判成败。
+    // 标准语义下首次调用确实返回 ERROR_BUFFER_OVERFLOW，但对 WinCE 部分 ROM
+    // 它会返回 NO_ERROR —— 此时长度已正确填好、函数"成功"返回，
+    // 调用点却因rc 不匹配直接 return，导致**第二次 GetAdaptersInfo 与链表遍历
+    // 永远不执行**。症状是"网卡明明拿到 IP，localIP 却恒为空、候选恒为 0"。
+    // 改为：拿到合理长度即视为就绪，不再把真实 rc 当成功判据。
     *out = need;
-    return rc;
+    return ERROR_BUFFER_OVERFLOW;
 }
 
 bool NetClient::IsSameSubnet(const char* ip) {
@@ -359,6 +368,8 @@ bool NetClient::IsSameSubnet(const char* ip) {
     if (!parseIPv4(ip, t)) return false;
     CrashSetStage("IsSameSubnet:AdapterBufLen");
     ULONG buflen = 0;
+    // R26：AdapterBufLen 现已统一为"返回 ERROR_BUFFER_OVERFLOW 即就绪"，
+    // 故只需判长度是否为 0。
     if (AdapterBufLen(&buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0) return false;
     std::vector<BYTE> buf;
     try { buf.resize(buflen); } catch (...) { return false; }
