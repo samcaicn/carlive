@@ -19,6 +19,8 @@ echo ">> building $OUT"
 "$CC" -O2 -Wall -Wno-unused-function \
   "$SCRIPT_DIR/src/main.cpp" \
   "$SCRIPT_DIR/src/net.cpp" \
+  "$SCRIPT_DIR/src/adb.cpp" \
+  "$SCRIPT_DIR/src/tcptransport.cpp" \
   "$SCRIPT_DIR/src/renderer.cpp" \
   "$SCRIPT_DIR/src/decoder.cpp" \
   "$SCRIPT_DIR/src/log.cpp" \

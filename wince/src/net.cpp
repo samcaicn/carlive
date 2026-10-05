@@ -1,6 +1,8 @@
 // net.cpp - 见 net.h
 #include "net.h"
 #include "log.h"
+#include "tcptransport.h"
+#include "adb.h"
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 #include <cstring>
@@ -16,38 +18,23 @@ static CRITICAL_SECTION g_csSend;
 static volatile LONG g_epoch = 0;
 long NetClient::ConnEpoch() { return g_epoch; }
 
+// 连接模式：默认直连（USB 网络共享）。可在 config.txt 设 mode=usb_adb 切到 ADB 隧道。
+static int s_mode = NetClient::CONN_MODE_USB_NET;
+void NetClient::SetMode(int m) {
+    if (m == CONN_MODE_USB_ADB) s_mode = CONN_MODE_USB_ADB;
+    else s_mode = CONN_MODE_USB_NET;
+    Log("NetClient: 模式切换为 %s", ModeName());
+}
+int NetClient::GetMode() { return s_mode; }
+const char* NetClient::ModeName() {
+    return s_mode == CONN_MODE_USB_ADB ? "usb_adb" : "usb_net";
+}
+
 // 单帧/单消息上限（收发两侧统一 8MB）：超过即视为损坏或异常流，直接跳过，
 // 避免在 64MB 级车机上做一次足以触发 OOM 的巨量分配。
 static const int MAX_FRAME_BYTES = 8 * 1024 * 1024;
 
-#ifndef TCP_NODELAY
-#define TCP_NODELAY 0x1
-#endif
-
-// 关闭 Nagle：触摸/视频小包立即发出，降低交互延迟。
-static void setNoDelay(SOCKET s) {
-    if (s == INVALID_SOCKET) return;
-    int one = 1;
-    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
-}
-
-// TCP 保活：对端异常掉线（无 RST）时让协议栈主动探活，配合心跳更快发现死链。
-// WinCE 保活间隔由注册表决定，默认较长，这里仅开启开关；真正的断线判定仍由心跳线程负责。
-static void setKeepAlive(SOCKET s) {
-    if (s == INVALID_SOCKET) return;
-    int one = 1;
-    setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, (const char*)&one, sizeof(one));
-}
-
-// 接收超时：保证任何 recv 不会永久阻塞——对端异常静默（无 RST、无数据）时 5s 内返回，
-// 触发断链重连，作为 close() 之外的双保险。取 5s > 心跳间隔(3s)，避免正常空闲（仅有心跳）被误判断链。
-static void setRecvTimeout(SOCKET s) {
-    if (s == INVALID_SOCKET) return;
-    int to = 5000;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&to, sizeof(to));
-}
-
-NetClient::NetClient() : m_sock(INVALID_SOCKET), m_codec(1) {
+NetClient::NetClient() : m_transport(NULL), m_codec(1) {
     WSADATA wsa = {0};
     WSAStartup(MAKEWORD(2,2), &wsa);
     InitializeCriticalSection(&g_csSend);
@@ -56,81 +43,50 @@ NetClient::NetClient() : m_sock(INVALID_SOCKET), m_codec(1) {
 NetClient::~NetClient() { close(); DeleteCriticalSection(&g_csSend); WSACleanup(); }
 
 bool NetClient::connect(const std::wstring& host, int port) {
-    // WinCE 无 getaddrinfo 的宽字符友好版，这里用 inet_addr 直连 IPv4
-    char buf[64];
-    WideCharToMultiByte(CP_ACP, 0, host.c_str(), -1, buf, sizeof(buf), NULL, NULL);
-    sockaddr_in sa = {0};
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons((u_short)port);
-    sa.sin_addr.s_addr = inet_addr(buf);
-    if (sa.sin_addr.s_addr == INADDR_NONE) return false;
+    close();
+    // 与 connectTimeout 保持一致：按模式选传输（ADB 隧道 vs 直连），
+    // 避免将来有人调用本接口时落到错误的底层连接。
+    if (s_mode == CONN_MODE_USB_ADB) m_transport = new AdbTransport();
+    else m_transport = new TcpTransport();
+    if (!m_transport->connect(host, port, 10000)) { delete m_transport; m_transport = NULL; return false; }
+    // 记录命中 IP（配合 device_id 记忆）
+    char ipbuf[64] = {0};
+    WideCharToMultiByte(CP_ACP, 0, host.c_str(), -1, ipbuf, sizeof(ipbuf), NULL, NULL);
+    m_connectedIP = ipbuf;
+    static std::string s_lastSavedIP;
+    if (m_connectedIP != s_lastSavedIP) { SaveKnownPhone("-", m_connectedIP); s_lastSavedIP = m_connectedIP; }
+    InterlockedIncrement(&g_epoch);
+    return m_transport->connected();
+}
 
-    m_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (m_sock == INVALID_SOCKET) return false;
-    setNoDelay(m_sock);
-    setKeepAlive(m_sock);
-    setRecvTimeout(m_sock);
-    if (::connect(m_sock, (SOCKADDR*)&sa, sizeof(sa)) == SOCKET_ERROR) {
-        close(); return false;
+bool NetClient::connectTimeout(const std::wstring& host, int port, int timeoutMs) {
+    close(); // 防御：丢弃任何残留连接，避免重连路径下泄漏/复用旧连接
+    // 按模式选择底层传输：usb_adb 走 ADB 隧道（连手机 5555 → OPEN tcp:8686），
+    // 其余直连手机 8686（原有行为）。候选 host 都是手机 IP，ADB 模式忽略 port（用 5555）。
+    if (s_mode == CONN_MODE_USB_ADB) {
+        char ipbuf[64] = {0};
+        WideCharToMultiByte(CP_ACP, 0, host.c_str(), -1, ipbuf, sizeof(ipbuf), NULL, NULL);
+        Log("NetClient: 以 ADB 模式连接 %s（adbd:5555 → OPEN tcp:8686）", ipbuf);
+        m_transport = new AdbTransport();
+    } else {
+        m_transport = new TcpTransport();
     }
-    m_connectedIP = buf; // 记录命中 IP（配合 device_id 记忆）
-    // R8 兜底：即使握手没解析到 device_id，也把“上次连通过的 IP”记住（id="-" 占位），
-    // 下次启动可直连，不再完全依赖信标/网关发现。
+    if (!m_transport->connect(host, port, timeoutMs)) {
+        delete m_transport; m_transport = NULL;
+        return false;
+    }
+    // 记录本次命中 IP（与握手解析到的 device_id 配对落盘，实现“记住这台手机”）
+    char ipbuf[64] = {0};
+    WideCharToMultiByte(CP_ACP, 0, host.c_str(), -1, ipbuf, sizeof(ipbuf), NULL, NULL);
+    m_connectedIP = ipbuf;
     static std::string s_lastSavedIP;
     if (m_connectedIP != s_lastSavedIP) { SaveKnownPhone("-", m_connectedIP); s_lastSavedIP = m_connectedIP; }
     InterlockedIncrement(&g_epoch); // 新连接：作废此前所有后台线程持有的 socket
     return true;
 }
 
-bool NetClient::connectTimeout(const std::wstring& host, int port, int timeoutMs) {
-    close(); // 防御：丢弃任何残留 socket，避免重连路径下泄漏/复用旧连接
-    char buf[64];
-    WideCharToMultiByte(CP_ACP, 0, host.c_str(), -1, buf, sizeof(buf), NULL, NULL);
-    sockaddr_in sa = {0};
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons((u_short)port);
-    sa.sin_addr.s_addr = inet_addr(buf);
-    if (sa.sin_addr.s_addr == INADDR_NONE) return false;
-
-    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (s == INVALID_SOCKET) return false;
-    setNoDelay(s);
-    setKeepAlive(s);
-
-    // 非阻塞 connect + select 超时
-    u_long mode = 1;
-    ioctlsocket(s, FIONBIO, &mode);
-    ::connect(s, (SOCKADDR*)&sa, sizeof(sa)); // 立即返回 WSAEWOULDBLOCK
-
-    fd_set wfds; FD_ZERO(&wfds); FD_SET(s, &wfds);
-    timeval tv; tv.tv_sec = timeoutMs / 1000; tv.tv_usec = (timeoutMs % 1000) * 1000;
-    int r = select(0, NULL, &wfds, NULL, &tv);
-    bool ok = false;
-    if (r == 1) {
-        int err = 0, el = sizeof(err);
-        getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&err, &el);
-        ok = (err == 0);
-    }
-    mode = 0; ioctlsocket(s, FIONBIO, &mode);
-    if (ok) {
-        setRecvTimeout(s);
-        m_sock = s;
-        // 记录本次命中 IP（与握手解析到的 device_id 配对落盘，实现“记住这台手机”）
-        char ipbuf[64] = {0};
-        WideCharToMultiByte(CP_ACP, 0, host.c_str(), -1, ipbuf, sizeof(ipbuf), NULL, NULL);
-        m_connectedIP = ipbuf;
-        // R8 兜底：无 device_id 也记住“上次连通过的 IP”（同 connect()，去重防频繁写盘）
-        static std::string s_lastSavedIP;
-        if (m_connectedIP != s_lastSavedIP) { SaveKnownPhone("-", m_connectedIP); s_lastSavedIP = m_connectedIP; }
-        InterlockedIncrement(&g_epoch); // 新连接：作废此前所有后台线程持有的 socket
-        return true;
-    }
-    closesocket(s);
-    return false;
-}
-
 bool NetClient::sendMsg(BYTE type, const BYTE* payload, int len) {
-    if (m_sock == INVALID_SOCKET) return false;
+    if (!m_transport || !m_transport->connected()) return false;
     std::vector<BYTE> msg;
     msg.reserve(9 + len);
     msg.insert(msg.end(), MAGIC, MAGIC+4);
@@ -144,15 +100,8 @@ bool NetClient::sendMsg(BYTE type, const BYTE* payload, int len) {
     // 串行化发送（触摸/心跳来自不同线程），并循环发送直到整条消息发完——
     // MJPEG 单帧可达数百 KB，一次 send 在阻塞 socket 上可能只发一部分，必须续发，否则对端收到截断帧。
     EnterCriticalSection(&g_csSend);
-    const char* p = (const char*)msg.data();
-    int total = (int)msg.size();
-    int off = 0;
-    bool ok = true;
-    while (off < total) {
-        int sent = ::send(m_sock, p + off, total - off, 0);
-        if (sent <= 0) { ok = false; break; }
-        off += sent;
-    }
+    // write() 已实现“精确写满 n 字节或断链返回 false”，无需上层续发。
+    bool ok = m_transport->write(msg.data(), (int)msg.size());
     LeaveCriticalSection(&g_csSend);
     if (!ok) { close(); return false; }
     return true;
@@ -169,7 +118,7 @@ void NetClient::sendHandshakeHeadunit(int maxW, int maxH) {
 }
 
 void NetClient::sendTouch(BYTE action, float nx, float ny) {
-    if (m_sock == INVALID_SOCKET) return;   // 未连接时直接丢弃，避免无谓加锁/失败发送
+    if (!m_transport || !m_transport->connected()) return;   // 未连接时直接丢弃，避免无谓加锁/失败发送
     BYTE p[10];
     p[0] = action;
     // float 大端
@@ -183,13 +132,8 @@ void NetClient::sendControl(BYTE code) { sendMsg(0x05, &code, 1); }
 bool NetClient::sendHeartbeat() { BYTE b=0; return sendMsg(0x06, &b, 1); }
 
 bool NetClient::readExact(BYTE* buf, int n) {
-    int off = 0;
-    while (off < n) {
-        int r = ::recv(m_sock, (char*)buf+off, n-off, 0);
-        if (r <= 0) return false;
-        off += r;
-    }
-    return true;
+    // ITransport::read() 已实现“精确读满 n 字节或断链返回 false”，无需上层续读。
+    return m_transport->read(buf, n);
 }
 
 bool NetClient::readMsg(BYTE& type, std::vector<BYTE>& payload) {
@@ -249,8 +193,8 @@ bool NetClient::recvVideoFrame(VideoFrame& out) {
             if (dlen > MAX_FRAME_BYTES) { Log("recvVideoFrame: 单帧过大 %d 字节，跳过", dlen); continue; }
             // 反压：若内核收包缓冲仍堆积大量数据，说明本端解码跟不上发送节奏，
             // 直接丢弃本帧继续读下一帧（取最新），避免无意义解码与内存拷贝。
-            u_long backlog = 0;
-            if (ioctlsocket(m_sock, FIONREAD, &backlog) == 0 && backlog > 96*1024) {
+            int backlog = m_transport->backlog();
+            if (backlog > 96*1024) {
                 continue;
             }
             out.data.assign(payload.begin()+9, payload.begin()+9 + dlen);
@@ -264,13 +208,14 @@ bool NetClient::recvVideoFrame(VideoFrame& out) {
 }
 
 void NetClient::close() {
-    if (m_sock != INVALID_SOCKET) {
+    if (m_transport) {
         // 先递增世代号，让仍在 recv/send 的旧线程尽快自检退出：
-        // 同一个 socket 句柄号可能在 closesocket 后被下一次连接立刻复用，
-        // 旧线程继续 recv 会读到新连接的数据流，导致协议错位与解码错帧。
+        // 同一个底层句柄号可能在 close 后被下一次连接立刻复用，
+        // 旧线程继续读会读到新连接的数据流，导致协议错位与解码错帧。
         InterlockedIncrement(&g_epoch);
-        closesocket(m_sock);
-        m_sock = INVALID_SOCKET;
+        m_transport->close();
+        delete m_transport;
+        m_transport = NULL;
     }
 }
 

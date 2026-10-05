@@ -6,6 +6,7 @@
 #include <winsock2.h>
 #include <vector>
 #include <string>
+#include "transport.h"
 
 struct VideoFrame {
     bool  isKey;
@@ -41,9 +42,9 @@ public:
     // 阻塞读取下一个视频帧（自动跳过非视频消息）。返回 false=断线。
     bool recvVideoFrame(VideoFrame& out);
     void close();
-    bool connected() const { return m_sock != INVALID_SOCKET; }
+    bool connected() const { return m_transport && m_transport->connected(); }
     int  codec() const { return m_codec; }   // 0=H264, 1=MJPEG（由 VIDEO_CONFIG 设置）
-    SOCKET sock() const { return m_sock; }   // 供积压检测（FIONREAD）使用
+    SOCKET sock() const { return (m_transport && m_transport->connected()) ? (SOCKET)1 : INVALID_SOCKET; } // 兼容旧调用
 
     // ---- 自动发现（纯探测，不写死任何地址）----
     static void StartDiscovery();   // 启动后台监听/探测线程，持续发现手机 IP
@@ -66,12 +67,21 @@ public:
     // 每个白等 1.5s。连续失败多轮时置 true，本轮忽略 known，让信标/网关探测先试；
     // 连接成功（或回到首轮）复位为 false。
     static void SetDeferKnown(bool defer);
+
+    // ---- 连接模式（USB 网络共享 vs USB 调试/ADB 隧道）----
+    // CONN_MODE_USB_NET：直连手机 8686（原有行为，默认）。
+    // CONN_MODE_USB_ADB：连手机 adbd 的 5555，OPEN tcp:8686 打通隧道（见 adb.cpp）。
+    static const int CONN_MODE_USB_NET = 0;
+    static const int CONN_MODE_USB_ADB = 1;
+    static void SetMode(int m);
+    static int  GetMode();
+    static const char* ModeName();
     // 注：原先在此声明过一个成员函数 PriorityCount()，但 net.cpp 中实际存在的同名函数是文件内
     // 静态自由函数、并非本类成员；一旦有人按 NetClient::PriorityCount() 调用将直接链接失败。
     // 候选计数目前仅扫描线程内部使用，故移除这个会误导人的悬空声明。
 
 private:
-    SOCKET m_sock;
+    ITransport* m_transport;   // 底层字节流（TcpTransport 或 AdbTransport）
     int m_codec;   // 当前视频编解码，默认 MJPEG(1)
     std::string m_phoneId;     // 对端手机稳定标识（握手解析）
     std::string m_connectedIP; // 本次命中 IP

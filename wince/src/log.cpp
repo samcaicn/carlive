@@ -1,6 +1,7 @@
 // log.cpp - 见 log.h
 // 把启动/连接里程碑与错误写入 EXE 同目录 tuptup.log，便于在车机 SD 卡上排查“启动卡死”等问题。
 #include "log.h"
+#include <windows.h>
 #include <stdarg.h>
 #include <string.h>
 

@@ -100,6 +100,11 @@ static bool validIPv4(const char* s) {
 // R10：显式端口透传到 g_cfgPort 生效（旧版解析了 pnum 却弃用，写非标端口无效）；
 //      host 行非法不再 break（旧版一行笔误会废掉后面所有行）。
 static int g_cfgPort = 8686;
+// 连接模式：由 config.txt 的 mode= 行决定（默认 usb_net=直连 8686）。
+static int g_cfgMode = NetClient::CONN_MODE_USB_NET;
+// 模式切换 toast（短暂提示，非镜像态也能看到）
+static wchar_t g_toastText[128] = L"";
+static DWORD    g_toastUntil = 0;
 static std::string readConfig() {
     std::string ip;
     WCHAR path[MAX_PATH] = {0};
@@ -125,6 +130,13 @@ static std::string readConfig() {
                 if (s == std::string::npos) continue;   // 空行
                 if (line[s] == '#') continue;           // 注释行
                 std::string body = line.substr(s);
+                // 解析 mode=usb_adb|usb_net（连接模式切换，见 adb.cpp）
+                char mbuf[32] = {0};
+                if (sscanf(body.c_str(), "mode=%31s", mbuf) == 1) {
+                    if (strcmp(mbuf, "usb_adb") == 0) g_cfgMode = NetClient::CONN_MODE_USB_ADB;
+                    else if (strcmp(mbuf, "usb_net") == 0) g_cfgMode = NetClient::CONN_MODE_USB_NET;
+                    continue;
+                }
                 char h[64]; int pnum = 0;
                 if (sscanf(body.c_str(), "host=%63s", h) == 1) {
                     // 非法的 host 忽略并继续读下一行（R10：不再 break，避免一行笔误废掉全部配置）
@@ -194,7 +206,8 @@ static DWORD WINAPI HeartbeatThread(LPVOID) {
 static DWORD WINAPI ConnThread(LPVOID) {
     int failRounds = 0;   // 连续连接失败轮次（用于退避，成功即清零）
     std::string cfg = readConfig();
-    Log("ConnThread start, configIP='%s' port=%d", cfg.c_str(), g_cfgPort);
+    if (g_cfgMode != NetClient::GetMode()) NetClient::SetMode(g_cfgMode);
+    Log("ConnThread start, configIP='%s' port=%d mode=%s", cfg.c_str(), g_cfgPort, NetClient::ModeName());
     // R14：立刻打第一条候选日志。旧版若 GetCandidates 返回空，会continue 到 Sleep(1000)
     // 再循环，而唯一能看出"卡在哪"的 round 日志在cands.empty() 分支之后——
     // 候选一直为空时日志里只有"未发现手机"，看不出网卡/网关枚举是否成功。
@@ -218,11 +231,19 @@ static DWORD WINAPI ConnThread(LPVOID) {
                 // R15：连续 30s 仍无任何候选，说明车机根本没发现手机（多为车机未识别 USB 网络共享），
                 // 给出可操作的排障清单，而不是永远停在“正在扫描”。
                 if (GetTickCount() - emptySince > 30000) {
-                    SetStatus(TEXT("tuptup.top · 长时间未发现手机\r\n"
-                        "1.手机已开启「USB网络共享」且车机已识别该网络\r\n"
-                        "2.tuptup.top App 已打开并点「启动投屏服务」\r\n"
-                        "3.WiFi 直连时确认两者在同一局域网\r\n"
-                        "4.ColorOS 等可能杀后台，请保持 App 在前台"));
+                    if (NetClient::GetMode() == NetClient::CONN_MODE_USB_ADB) {
+                        SetStatus(TEXT("tuptup.top · ADB 模式长时间未发现手机\r\n"
+                            "1.手机已开启「USB 调试」且 adbd 在 TCP 5555 监听（adb tcpip 5555）\r\n"
+                            "2.车机已通过 USB 网络共享连上手机同一网段\r\n"
+                            "3.tuptup.top App 已打开并点「启动投屏服务」\r\n"
+                            "4.首次连接请点手机弹出的「允许 USB 调试」"));
+                    } else {
+                        SetStatus(TEXT("tuptup.top · 长时间未发现手机\r\n"
+                            "1.手机已开启「USB网络共享」且车机已识别该网络\r\n"
+                            "2.tuptup.top App 已打开并点「启动投屏服务」\r\n"
+                            "3.WiFi 直连时确认两者在同一局域网\r\n"
+                            "4.ColorOS 等可能杀后台，请保持 App 在前台"));
+                    }
                 } else {
                     SetStatus(TEXT("tuptup.top 车机投屏 · 未发现手机，正在扫描网络…\r\n请在手机打开 tuptup.top App 并点「启动投屏服务」+允许录屏"));
                 }
@@ -242,10 +263,10 @@ static DWORD WINAPI ConnThread(LPVOID) {
             }
             for (size_t i = 0; i < cands.size() && !ok; i++) {
                 if (cands[i].empty()) continue;  // R8：双保险，空候选直接跳过
-                std::wstring w = L"tuptup.top 车机投屏 · 正在连接 ";
+                std::wstring w = L"tuptup.top [";
+                w += A2W(NetClient::ModeName());
+                w += L"] 正在连接 ";
                 w += A2W(cands[i].c_str());
-                w += L":";
-                w += std::to_wstring(g_cfgPort);
                 w += L"…";
                 SetStatus(w.c_str());
                 if (logRound) Log("try connect %s:%d", cands[i].c_str(), g_cfgPort);
@@ -319,6 +340,50 @@ static DWORD WINAPI ConnThread(LPVOID) {
 static bool  s_touchDown = false;
 static POINT s_lastPt = {0, 0};
 
+// 右上角模式徽标热区（点按切换 usb_adb / usb_net）
+static void GetModeBadgeRect(HWND hwnd, RECT& r) {
+    RECT rc; GetClientRect(hwnd, &rc);
+    int w = rc.right > 0 ? rc.right : 800;
+    r.left = w - 150; r.top = 4; r.right = w - 4; r.bottom = 26;
+}
+// 原子写回 config.txt 的 mode= 行（保留其他行，如 host=）
+static void WriteConfigMode(int mode) {
+    WCHAR path[MAX_PATH] = {0};
+    if (GetModuleFileName(NULL, path, MAX_PATH)) {
+        WCHAR* p = wcsrchr(path, L'\\');
+        if (p) wcscpy(p + 1, L"config.txt"); else wcscpy(path, L"config.txt");
+    }
+    std::string content;
+    HANDLE hf = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (hf != INVALID_HANDLE_VALUE) {
+        char buf[512]; DWORD rd = 0;
+        while (ReadFile(hf, buf, sizeof(buf) - 1, &rd, NULL) && rd > 0) { buf[rd] = 0; content += buf; }
+        CloseHandle(hf);
+    }
+    std::string out; size_t pos = 0;
+    while (pos < content.size()) {
+        size_t nl = content.find('\n', pos);
+        std::string line = content.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+        pos = (nl == std::string::npos) ? content.size() : nl + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.size() >= 5 && strncmp(line.c_str(), "mode=", 5) == 0) continue;
+        out += line + "\n";
+    }
+    out += (mode == NetClient::CONN_MODE_USB_ADB) ? "mode=usb_adb\n" : "mode=usb_net\n";
+    WCHAR tmp[MAX_PATH]; wcsncpy(tmp, path, MAX_PATH - 1); wcscat(tmp, L".tmp");
+    HANDLE hf2 = CreateFile(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    if (hf2 != INVALID_HANDLE_VALUE) {
+        DWORD wr = 0;
+        if (WriteFile(hf2, out.c_str(), (DWORD)out.size(), &wr, NULL)
+            && wr == (DWORD)out.size() && FlushFileBuffers(hf2)) {
+            CloseHandle(hf2);
+            DeleteFile(path);
+            if (!MoveFile(tmp, path)) { Log("WriteConfigMode: rename 失败"); DeleteFile(tmp); }
+            else Log("WriteConfigMode: 写入 mode=%s", mode ? "usb_adb" : "usb_net");
+        } else { CloseHandle(hf2); DeleteFile(tmp); Log("WriteConfigMode: 写失败"); }
+    }
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_ERASEBKGND:
@@ -351,10 +416,60 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             RECT dr = rc; dr.top += (rc.bottom - th) / 2;
             DrawText(hdc, txt, -1, &dr, DT_CENTER | DT_WORDBREAK);
         }
+        // 右上角模式徽标（常驻，点按切换；叠加在视频之上也可见）
+        {
+            RECT br; GetModeBadgeRect(hwnd, br);
+            bool adb = (NetClient::GetMode() == NetClient::CONN_MODE_USB_ADB);
+            HBRUSH bg = CreateSolidBrush(adb ? RGB(0, 140, 90) : RGB(40, 90, 160));
+            FillRect(hdc, &br, bg); DeleteObject(bg);
+            SetTextColor(hdc, RGB(255, 255, 255));
+            SetBkMode(hdc, TRANSPARENT);
+            wchar_t btxt[64];
+            wsprintf(btxt, L"模式:%s ▸", adb ? L"ADB" : L"网络");
+            DrawText(hdc, btxt, -1, &br, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        // 模式切换 toast（短暂提示，覆盖在最上层）
+        if (g_toastUntil && GetTickCount() < g_toastUntil) {
+            RECT rc; GetClientRect(hwnd, &rc);
+            RECT tb = { rc.left + 40, rc.bottom / 2 - 24, rc.right - 40, rc.bottom / 2 + 24 };
+            HBRUSH bg = CreateSolidBrush(RGB(20, 20, 20));
+            FillRect(hdc, &tb, bg); DeleteObject(bg);
+            SetTextColor(hdc, RGB(120, 255, 160));
+            SetBkMode(hdc, TRANSPARENT);
+            DrawText(hdc, g_toastText, -1, &tb, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
         EndPaint(hwnd, &ps);
         return 0;
     }
+    case WM_TIMER:
+        if (g_toastUntil && GetTickCount() >= g_toastUntil) {
+            g_toastUntil = 0;
+            KillTimer(hwnd, 1);
+            InvalidateRect(hwnd, NULL, FALSE);   // 清除 toast
+        }
+        return 0;
     case WM_LBUTTONDOWN: {
+        // 右上角模式徽标热区：点按在镜像/非镜像态都能切换 usb_adb ↔ usb_net，并触发重连。
+        // 命中热区时不转发触摸给手机，避免误触。
+        {
+            RECT br; GetModeBadgeRect(hwnd, br);
+            int mx = (int)(short)LOWORD(lp), my = (int)(short)HIWORD(lp);
+            if (mx >= br.left && mx <= br.right && my >= br.top && my <= br.bottom) {
+                int nm = (NetClient::GetMode() == NetClient::CONN_MODE_USB_ADB)
+                         ? NetClient::CONN_MODE_USB_NET : NetClient::CONN_MODE_USB_ADB;
+                NetClient::SetMode(nm);
+                g_cfgMode = nm;
+                WriteConfigMode(nm);
+                if (g_net) g_net->close();   // 强制断开，ConnThread 会用新模式重连
+                g_linkAlive = false;
+                wcscpy(g_toastText, nm == NetClient::CONN_MODE_USB_ADB
+                       ? L"已切换：USB 调试 (ADB 隧道)" : L"已切换：USB 网络共享");
+                g_toastUntil = GetTickCount() + 2500;
+                SetTimer(hwnd, 1, 400, NULL);
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+        }
         // 首帧到达前 letterbox 内容区尚未确立，此刻映射出的坐标与画面比例不符（手机竖屏时偏差很大），直接忽略
         if (!g_hasFrame) break;
         int x = (int)(short)LOWORD(lp);
@@ -498,6 +613,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
     g_renderer = new Renderer(g_hwnd);
     g_net = new NetClient();
     Log("renderer+net created (WSAStartup done)");
+    // 预读 config（IP + mode），使车机启动即应用所选连接模式
+    readConfig();
+    if (g_cfgMode != NetClient::GetMode()) NetClient::SetMode(g_cfgMode);
 
     // 启动 UDP 自动发现（监听手机广播的 IP）
     NetClient::StartDiscovery();
