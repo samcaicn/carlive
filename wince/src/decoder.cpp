@@ -18,21 +18,66 @@ bool Decoder::decode(BYTE codec, const BYTE* data, int len,
     return false;
 }
 
+// R20：在真正解码**之前**从 JPEG 字节流里读出 SOF 声明的宽高。
+// 用途：nanojpeg 会在 njDecode 内部按 SOF 宽高直接分配 width*height*ncomp 内存，
+// 所以"先解码再检查尺寸"这种保护形同虚设（巨量分配已经发生，进程已死）。
+// 这里只扫 marker 段、不做任何解码，零分配，可以安全地用来做前置拦截。
+// 支持 SOF0(0xC0)/SOF2(0xC2) 等基线/渐进式；跳过 APPn/DHT/SOS 等待变尺寸的段。
+bool Decoder::peekJpegSize(const BYTE* d, int len, int& outW, int& outH) {
+    if (!d || len < 4) return false;
+    if (d[0] != 0xFF || d[1] != 0xD8) return false;        // 缺 SOI
+    int i = 2;
+    while (i + 3 < len) {
+        if (d[i] != 0xFF) { i++; continue; }              // 填充字节，继续找 marker
+        BYTE m = d[i + 1];
+        if (m == 0xFF) { i++; continue; }                 // 连续 FF
+        if (m == 0xD8 || m == 0x01 || (m >= 0xD0 && m <= 0xD7)) { i += 2; continue; }  // 独立标记
+        if (i + 3 >= len) break;
+        int segLen = (d[i + 2] << 8) | d[i + 3];
+        if (segLen < 2 || i + 2 + segLen > len) break;   // 段长非法/截断
+        // SOF0..SOF15，排除 DHT(C4)/JPG(C8)/DAC(CC)
+        if (m >= 0xC0 && m <= 0xCF && m != 0xC4 && m != 0xC8 && m != 0xCC) {
+            if (segLen < 7) return false;                 // SOF 段至少 8 字节
+            outH = (d[i + 5] << 8) | d[i + 6];
+            outW = (d[i + 7] << 8) | d[i + 8];
+            return outW > 0 && outH > 0;
+        }
+        if (m == 0xDA) return false;                      // SOS：图像数据开始，再往前没有尺寸
+        i += 2 + segLen;
+    }
+    return false;
+}
+
 bool Decoder::decodeMJPEG(const BYTE* data, int len,
                           std::vector<BYTE>& rgb, int& w, int& h) {
     if (!data || len <= 0) return false;
+    // R20 致命修复（OOM 防护前置）：原代码先 njDecode 再查尺寸，**顺序完全错了**——
+    //   nanojpeg 在 njDecode 内部就按 SOF 里未经校验的宽高分配
+    //   （nanojpeg.c: `nj.rgb = njAllocMem(width*height*ncomp)`），
+    //   一张声明 20000×20000 的畸形 JPEG 会在分配阶段申请 ~1.2GB，进程当场死亡，
+    //   后面的 8M 像素检查形同虚设。
+    // 现改为：解码**之前**先扫 SOF0/SOF2 标记读出真实宽高，超限直接拒——
+    //   巨量分配被挡在发生之前。像素上限按车机实际画布收紧到 2M
+    //  （车机客户区仅 800×480≈0.38M 像素，2M 已远超需要，远低于 64MB 设备的承受力）。
+    {
+        const long long MAX_PIXELS = 2000000LL;   // ≈1400×1430
+        int jw = 0, jh = 0;
+        if (peekJpegSize(data, len, jw, jh) && (long long)jw * (long long)jh > MAX_PIXELS) {
+            Log("decodeMJPEG: SOF 声明 %dx%d 超上限(%lld像素)，解码前拒绝防OOM", jw, jh, MAX_PIXELS);
+            return false;   // 关键：巨量分配**尚未发生**
+        }
+    }
     njInit();
     if (njDecode(data, len) != NJ_OK) { njDone(); return false; }
 
     int iw = njGetWidth();
     int ih = njGetHeight();
     if (iw <= 0 || ih <= 0) { njDone(); return false; }  // 防御：解码成功但产出 0 尺寸（损坏流）
-    // R15：单帧像素总量上限保护。手机端若发来异常/超大 JPEG（损坏的尺寸字段或误发的原图），
-    // nanojpeg 内部 + 下方 rgb.resize(iw*ih*4) 会在 64MB 级 WinCE 上一次性申请数十 MB 连续内存，
-    // 直接触发 OOM 进程崩溃（且无声、无日志）。车机客户端区仅 800x480，手机原图通常 <=1080x1920≈2M 像素；
-    // 这里取 8M 像素（≈32MB RGB32）余量足够，超出直接丢弃本帧，绝不为一帧赌上整机稳定性。
-    if ((long long)iw * (long long)ih > 8000000LL) {
-        Log("decodeMJPEG: 单帧 %dx%d 超像素上限(8M)，丢弃防OOM", iw, ih);
+    // R15/R20：后置像素上限保护保留（作为第二道防线），上限与前置检查统一为 2M。
+    // 车机客户区仅 800×480≈0.38M 像素，2M 已远超需要；8M（≈32MB RGB32 + nanojpeg
+    // 内部 24MB + 视频缓冲）在 64MB 级 WinCE 上必然触发 OOM。
+    if ((long long)iw * (long long)ih > 2000000LL) {
+        Log("decodeMJPEG: 单帧 %dx%d 超像素上限(2M)，丢弃防OOM", iw, ih);
         njDone(); return false;
     }
     const unsigned char* src = njGetImage();

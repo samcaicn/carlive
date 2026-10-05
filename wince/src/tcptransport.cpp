@@ -19,11 +19,20 @@ static void setKeepAlive(SOCKET s) {
 }
 static void setRecvTimeout(SOCKET s) {
     if (s == INVALID_SOCKET) return;
-    int to = 5000;   // 取 5s > 心跳间隔(3s)，避免正常空闲被误判断链
+    // R20致命修复：原设 5s，注释理由是"5s > 心跳 3s，避免空闲误判断链"——
+    //   但手机端**根本没有实现心跳**（NetClient.sendHeartbeat() 定义了但全工程零调用点），
+    //   且 MjpegSender 在画面静止时 `continue` 一帧都不发（省流量设计）。
+    //   三者叠加 = 画面一静止，5s 后 SO_RCVTIMEO 到期 → recv 返回错误 →
+    //   read() false → 判定断链 → 重连 → 再静止 5s → 再断……
+    //   表现就是"连上 5 秒就断、反复闪已连接/连接断开"，用户观感= 永远连不上。
+    // 现在把超时放宽到 15s：即便手机端一个字节都不发，也 15s 才断；
+    // 真正的死链判定交给上层心跳线程的"接收侧活性"检查（net.cpp 的 g_lastRecvTick），
+    // 它能区分"对端真的死了"和"对端只是安静"。
+    int to = 15000;
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&to, sizeof(to));
 }
 
-TcpTransport::TcpTransport() : m_sock(INVALID_SOCKET) {}
+TcpTransport::TcpTransport() : m_sock(INVALID_SOCKET), m_lastFailTimeout(false) {}
 
 TcpTransport::~TcpTransport() { close(); }
 
@@ -73,7 +82,16 @@ bool TcpTransport::read(BYTE* buf, int n) {
     int off = 0;
     while (off < n) {
         int r = ::recv(m_sock, (char*)buf + off, n - off, 0);
-        if (r <= 0) return false;
+        if (r == 0) { m_lastFailTimeout = false; return false; }          // 对端正常关闭(FIN) = 真断链
+        if (r < 0) {
+            int err = WSAGetLastError();
+            // R20：WSAETIMEDOUT / WSAEWOULDBLOCK 都属于"接收超时"——对端仍在线只是没发数据。
+            // 原实现与"对端关闭"同等return false，导致手机端（无心跳+静帧不发字节）
+            // 画面一静止 5s 就被判断链，反复重连。现如实区分语义，交上层决定是否重连。
+            if (err == WSAETIMEDOUT || err == WSAEWOULDBLOCK) { m_lastFailTimeout = true; return false; }
+            m_lastFailTimeout = false;
+            return false;                                                  // 其余错误码 = 真断链
+        }
         off += r;
     }
     return true;

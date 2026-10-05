@@ -50,10 +50,25 @@ class NetClient {
             `in` = DataInputStream(BufferedInputStream(socket!!.getInputStream()))
             running = true
             thread(name = "tuptup-net-rx") { readLoop() }
+            // R20 致命修复：sendHeartbeat() 之前**全工程零调用点** —— 协议文档写的
+            //   "每 3s 双向各发一次"手机侧从未实现。叠加 MjpegSender 的"静帧不编码"
+            //   （画面不变则 continue，一帧不发），车机在画面静止 5s 后 SO_RCVTIMEO 到期
+            //   就判断链 → 重连 → 再静止 5s → 再断，用户观感= 永远连不上。
+            //   这里补上手机侧 3s 心跳，让双向保活真正成立。
+            thread(name = "tuptup-net-hb", isDaemon = true) { heartbeatLoop() }
             true
         } catch (e: Exception) {
             onLog?.invoke("attach fail: ${e.message}")
             false
+        }
+    }
+
+    /** 手机侧保活：每 3s 发一次空心跳（对应 protocol.md §7 的"双向各发一次"）。 */
+    private fun heartbeatLoop() {
+        while (running) {
+            try { Thread.sleep(3000) } catch (_: InterruptedException) { break }
+            if (!running) break
+            sendHeartbeat()
         }
     }
 

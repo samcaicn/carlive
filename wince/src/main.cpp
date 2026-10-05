@@ -18,7 +18,9 @@ static NetClient* g_net = NULL;
 static Renderer* g_renderer = NULL;
 static Decoder  g_decoder;
 static HWND     g_hwnd = NULL;
-static bool     g_running = true;
+// R20：必须 volatile —— GUI 线程写、3 个后台线程读。g_active/g_linkAlive 都有 volatile，
+//唯独这个漏了，编译器可把循环里的读缓存进寄存器 → 后台线程看不到退出信号 → 线程永不退出。
+static volatile bool g_running = true;
 static HANDLE   g_hConnThread = NULL;  // 连接线程句柄：退出时必须等它真正结束，否则会在其仍在运行时 delete 它正用的对象
 // 窗口是否处于前台激活态：车机上切到导航/音乐等程序后，无需再为看不见的画面做高开销的解码+拉伸。
 static volatile bool g_active = true;
@@ -162,9 +164,22 @@ static DWORD WINAPI RecvThread(LPVOID) {
     const long myEpoch = NetClient::ConnEpoch(); // 本线程所属“连接世代”
     while (g_running && g_net && g_net->connected() && NetClient::ConnEpoch() == myEpoch) {
         if (!g_net->recvVideoFrame(f)) {
-            // 对端关闭/协议错位：立即标记断链，触发 ConnThread 秒级重连，
-            // 不必等心跳(3s×2)判定，避免车机长时间显示“镜像中”却实则黑屏。
-            if (g_running && g_net && g_net->connected()) g_linkAlive = false;
+            // R20 致命修复：这里原本"收包失败 = 断链"，但阻塞 socket 的 recv 超时
+            // （WSAETIMEDOUT）与对端 FIN 都返回 false，语义完全相反。
+            // 手机端【未实现心跳】（NetClient.sendHeartbeat 零调用点）且
+            // 【静帧不编码】（MjpegSender 画面不变则 continue，一帧不发），
+            // 于是画面一静止就 5s 超时 → 旧代码立刻标记断链 → 重连 → 再静止 5s → 再断，
+            // 表现就是"连上 5 秒就断、标题栏反复闪"，用户观感= 永远连不上。
+            // 现在：仅"真断链"才置断；"只是超时（对端安静）"继续等，
+            // 真正的死链由心跳线程按接收侧活性（LastRecvTick 超阈值）判定。
+            bool timeoutOnly = g_net->lastRecvWasTimeout();
+            if (g_running && g_net && g_net->connected() && !timeoutOnly) {
+                Log("net: 对端关闭/协议错位，判定断链");
+                g_linkAlive = false;
+            } else if (timeoutOnly) {
+                // 静帧期：保持 g_linkAlive，交给心跳线程的活性超时兜底（阈值远大于 15s）
+                continue;
+            }
             break;
         }
         g_linkAlive = true; // 收到数据，链路活跃
@@ -185,6 +200,12 @@ static DWORD WINAPI RecvThread(LPVOID) {
 // 心跳线程
 static DWORD WINAPI HeartbeatThread(LPVOID) {
     const long myEpoch = NetClient::ConnEpoch();
+    // R20：接收侧活性阈值。手机端不发动态帧时（静帧）可能几十秒零字节，
+    //   这是**正常**的（省流量），因此阈值必须远大于 15s 的 recv 超时；
+    //   取 40s 意味着"对端整整 40 秒一个字节都没给"才判定为真死链。
+    //   真正的死链（拔线/手机杀进程/崩溃）会在 TCP 层 FIN 或 socket 错误里体现，
+    //   RecvThread 也会立即发现，无需靠心跳兜底。
+    const DWORD RX_IDLE_LIMIT_MS = 40000;
     while (g_running && g_net && g_net->connected() && NetClient::ConnEpoch() == myEpoch) {
         // R11：投屏前台运行时周期性重置系统空闲计时器，防止车机因“无操作”息屏/挂起——
         // 系统一挂起 socket 被冻结，恢复后必断链重连。仅在【已连接且前台激活】时重置，
@@ -192,9 +213,29 @@ static DWORD WINAPI HeartbeatThread(LPVOID) {
         if (g_active) SystemIdleTimerReset();
         bool ok = g_net->sendHeartbeat();
         if (!ok) {
-            if (++g_hbFail >= 2) g_linkAlive = false;
+            // send 失败：本地 socket 都写不进去，基本可确定链路已死
+            if (++g_hbFail >= 2) {
+                Log("net: 心跳发送连续失败，断开");
+                g_linkAlive = false;
+            }
         } else {
             g_hbFail = 0;
+        }
+        // R20 接收侧活性判定：这是"对端真死"的**可靠**判据。
+        //   旧逻辑只看 send 返回值，而 TCP 重传机制下对端已死（拔线/杀进程）时
+        //   send 会持续"成功"（数据进本地发送缓冲）→ 永远不判断线，
+        //   界面就一直卡在"已连接，镜像中"实则黑屏。
+        //   recv 侧则不同：对端真死必然触发 FIN/错误，RecvThread 立即退出；
+        //   这里再加一道"长时间零字节"的兜底，覆盖 RecvThread 被帧解析卡住的边角。
+        if (ok) {
+            DWORD lastRx = NetClient::LastRecvTick();
+            DWORD idle = GetTickCount() - lastRx;
+            // 注意：刚建链时 lastRx 可能为 0（还没收到任何字节），用 ConnEpoch 有效性兜底：
+            // 只要连上超过 RX_IDLE_LIMIT_MS 且一个字节都没收到，才判死。
+            if (lastRx != 0 && idle > RX_IDLE_LIMIT_MS) {
+                Log("net: 接收侧静默 %lu ms 无任何数据，判定对端失联", idle);
+                g_linkAlive = false;
+            }
         }
         Sleep(3000);
     }
@@ -203,11 +244,20 @@ static DWORD WINAPI HeartbeatThread(LPVOID) {
 }
 
 // 连接管理线程：发现→连接→握手→收发→检测断线→重连。主线程只负责消息泵与 UI。
+// R16：判断某 IP 是否在候选列表里（用于判断 config.txt 的 IP 本轮是否真被尝试过）
+static bool HasIPIn(const std::vector<std::string>& v, const std::string& ip) {
+    for (size_t i = 0; i < v.size(); i++) if (v[i] == ip) return true;
+    return false;
+}
+
 static DWORD WINAPI ConnThread(LPVOID) {
     int failRounds = 0;   // 连续连接失败轮次（用于退避，成功即清零）
     std::string cfg = readConfig();
     if (g_cfgMode != NetClient::GetMode()) NetClient::SetMode(g_cfgMode);
-    Log("ConnThread start, configIP='%s' port=%d mode=%s", cfg.c_str(), g_cfgPort, NetClient::ModeName());
+    // R16：把本机实际网段打进启动日志。网段问题排查的第一步就是确认"车机到底在哪个网段"，
+    // 旧版日志里没有这条，导致只能靠猜（实测踩了 6.8 小时）。
+    Log("ConnThread start, configIP='%s' port=%d mode=%s localIP=%s",
+        cfg.c_str(), g_cfgPort, NetClient::ModeName(), NetClient::LocalIPv4().c_str());
     // R14：立刻打第一条候选日志。旧版若 GetCandidates 返回空，会continue 到 Sleep(1000)
     // 再循环，而唯一能看出"卡在哪"的 round 日志在cands.empty() 分支之后——
     // 候选一直为空时日志里只有"未发现手机"，看不出网卡/网关枚举是否成功。
@@ -222,6 +272,15 @@ static DWORD WINAPI ConnThread(LPVOID) {
     while (g_running) {
         bool ok = false;
         DWORD emptySince = 0;   // R15：候选连续为空的起始 tick，用于超时给更明确的排障提示
+        // R16 网段健壮性：监视本机 IP。网段一变（手机换网络/USB 重新枚举会拿到新网段），
+        // 旧的扫描/网关候选全部作废，必须清空并立刻重扫，否则会一直守着旧网段的死地址空转。
+        static std::string s_lastLocalIP = NetClient::LocalIPv4();
+        std::string curLocalIP = NetClient::LocalIPv4();
+        if (curLocalIP != s_lastLocalIP) {
+            Log("net: 本机地址变化 %s -> %s，清空候选并重扫", s_lastLocalIP.c_str(), curLocalIP.c_str());
+            s_lastLocalIP = curLocalIP;
+            NetClient::ClearScanned();
+        }
         while (g_running && !ok) {
             std::vector<std::string> cands;
             NetClient::GetCandidates(cfg, cands);
@@ -238,11 +297,15 @@ static DWORD WINAPI ConnThread(LPVOID) {
                             "3.tuptup.top App 已打开并点「启动投屏服务」\r\n"
                             "4.首次连接请点手机弹出的「允许 USB 调试」"));
                     } else {
-                        SetStatus(TEXT("tuptup.top · 长时间未发现手机\r\n"
-                            "1.手机已开启「USB网络共享」且车机已识别该网络\r\n"
-                            "2.tuptup.top App 已打开并点「启动投屏服务」\r\n"
-                            "3.WiFi 直连时确认两者在同一局域网\r\n"
-                            "4.ColorOS 等可能杀后台，请保持 App 在前台"));
+                        // R16：附上本机真实网段。空候选时最关键的判断依据就是
+                        // "车机拿到的 IP 是多少、跟手机是否同段"，不给这个用户只能盲猜。
+                        std::wstring w = TEXT("tuptup.top · 长时间未发现手机\r\n");
+                        w += L"本车机地址："; w += A2W(NetClient::LocalIPv4().c_str()); w += L"\r\n\r\n";
+                        w += TEXT("1.手机已开启「USB网络共享」且车机已识别该网络\r\n"
+                                  "2.手机与车机需在同一网段（手机 IP 前三段应与上面一致）\r\n"
+                                  "3.tuptup.top App 已打开并点「启动投屏服务」\r\n"
+                                  "4.如手机换了网络/热点，需重启投屏让其重新发现");
+                        SetStatus(w.c_str());
                     }
                 } else {
                     SetStatus(TEXT("tuptup.top 车机投屏 · 未发现手机，正在扫描网络…\r\n请在手机打开 tuptup.top App 并点「启动投屏服务」+允许录屏"));
@@ -273,6 +336,15 @@ static DWORD WINAPI ConnThread(LPVOID) {
                 if (g_net->connectTimeout(A2W(cands[i].c_str()), g_cfgPort, 1500)) ok = true;
                 else if (logRound) Log("connect FAIL %s:%d (手机端未监听/未启动App?)", cands[i].c_str(), g_cfgPort);
             }
+            // R16：把"是不是 config.txt 那个 IP 连上了"反馈给候选层，
+            // 让连续失败的写死 IP 自动让位给自动发现（否则它每轮独占 1.5s 超时）。
+            if (!cfg.empty() && !HasIPIn(cands, cfg)) {
+                NetClient::NoteConfigIPResult(false);   // 已被让位，视作本轮未使用
+            } else if (ok) {
+                NetClient::NoteConfigIPResult(true);
+            } else {
+                NetClient::NoteConfigIPResult(false);
+            }
             if (!ok) {
                 // 退避：连续失败轮次越多间隔越久（500ms 起步，上限 3s）。手机 App 未启动时，
                 // 原本每 500ms 就把全部候选连一遍，白占单核 CPU 与 USB 网络；成功即清零，不影响正常重连。
@@ -294,6 +366,9 @@ static DWORD WINAPI ConnThread(LPVOID) {
         NetClient::ClearScanned();    // 清掉已采纳之外的旧候选，避免重连时白等失效 IP
         SetStatus(TEXT("tuptup.top 车机投屏 · 已连接，等待手机画面…"));
         Log("connected -> handshake sent, spawning recv/heartbeat");
+        // R20：新连接建立后重置接收侧活性基准 —— 否则心跳线程会拿上一条连接的
+        //   LastRecvTick 计算静默时长，进门就误判"对端静默超时"而立刻断链。
+        NetClient::ResetRecvTick();
 
         HANDLE hRecv = CreateThread(NULL, 0, RecvThread, NULL, 0, NULL);
         HANDLE hHb   = CreateThread(NULL, 0, HeartbeatThread, NULL, 0, NULL);
@@ -633,16 +708,32 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
 
     Log("message pump exited, cleanup");
     // 退出顺序至关重要：必须让后台线程真正停下来，才能销毁它们仍在使用的对象。
-    // 此前 WM_DESTROY 只把 g_running 置 false 就继续往下走，连接/收帧线程很可能
-    // 正在调用 SetStatus / renderer->present，从而访问到已被 delete 的对象（退出崩溃）。
+    // R20 致命修复：原代码 WaitForSingleObject 超时后只 Log 一句 warning 就**继续销毁**，
+    //   而后台线程确实可能超时：
+    //   · ADB 模式单个候选一次 connect 最长阻塞 60s（adb.cpp 的 60s 授权等待窗口）
+    //   · SubnetScanThread 一轮全段扫描最坏 254×(60ms+8ms)≈17s，而 StopDiscovery 只等 8s
+    //   超时后线程仍在调SetStatus / renderer->present，此时 delete g_renderer、
+    //   DeleteCriticalSection(&g_csStatus) 就是 use-after-free → 退出崩溃 / 死锁。
+    // 修法：任一线程 join 超时**就不再销毁任何对象**，直接结束进程 ——
+    //   进程退出由OS 回收全部内存，比踩 use-after-free 安全得多（宁可少一次正常清理）。
+    bool safeToDestroy = true;
     if (g_hConnThread) {
-        if (WaitForSingleObject(g_hConnThread, 6000) == WAIT_TIMEOUT) Log("warn: conn thread join timeout");
+        if (WaitForSingleObject(g_hConnThread, 6000) == WAIT_TIMEOUT) {
+            Log("warn: conn thread join timeout — 跳过销毁，直接退出避免 use-after-free");
+            safeToDestroy = false;
+        }
         CloseHandle(g_hConnThread); g_hConnThread = NULL;
     }
-    NetClient::StopDiscovery();     // 内部等待信标/扫描线程退出并回收句柄（此前句柄一直泄漏）
-    if (g_net) { g_net->close(); delete g_net; g_net = NULL; }
-    if (g_renderer) { delete g_renderer; g_renderer = NULL; }
-    DeleteCriticalSection(&g_csStatus);
+    if (safeToDestroy) {
+        NetClient::StopDiscovery();     // 内部等待信标/扫描线程退出并回收句柄
+    } else {
+        Log("warn: 跳过 StopDiscovery 与对象销毁（后台线程可能仍在运行）");
+    }
+    if (safeToDestroy) {
+        if (g_net) { g_net->close(); delete g_net; g_net = NULL; }
+        if (g_renderer) { delete g_renderer; g_renderer = NULL; }
+        DeleteCriticalSection(&g_csStatus);
+    }
     Log("==== tuptup.top exit ====");
     return 0;
 }

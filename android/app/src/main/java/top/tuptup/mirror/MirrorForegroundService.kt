@@ -229,6 +229,18 @@ class MirrorForegroundService : Service() {
         while (net.headunitSize == null && android.os.SystemClock.elapsedRealtime() - t0 < 600) {
             try { Thread.sleep(50) } catch (_: InterruptedException) { break }
         }
+        // R20 致命修复：车机端发现阶段的 probePort（扫网关/.1/.129/全段）会**大量**
+        //   "连上就立刻 close" 的探测连接。旧实现把这些探测包也当成真实车机，
+        //   一律走完握手 + 创建 VirtualDisplay + ImageReader + JPEG 编码器，
+        //   全段扫描一轮 254 次、每 5s 一轮 —— 手机被探测风暴打垮
+        //   （MediaProjection 限流、createVirtualDisplay 抛异常、CPU 耗尽），
+        //   结果就是"8686 明明开着、车机却连不上/连上就断"。
+        // 现在：**握手没等到 = 探测包**，直接丢弃，绝不碰录屏/编码器。
+        if (net.headunitSize == null) {
+            Log.i(TAG, "probe connection (no headunit handshake) -> discard, no sender")
+            try { net.close() } catch (_: Exception) { }
+            return
+        }
         updateNotification("tuptup.top 车机投屏 · 已连接，镜像中")
         startSenderIfReady()
     }

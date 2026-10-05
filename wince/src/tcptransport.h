@@ -12,6 +12,9 @@ public:
     bool connected() const override { return m_sock != INVALID_SOCKET; }
     void close() override;
     int  backlog() const override;
+    // R20：区分"接收超时（对端仍在线）"与"真断链（对端关闭/出错）"
+    bool lastFailWasTimeout() const override { return m_lastFailTimeout; }
 private:
     SOCKET m_sock;
+    bool  m_lastFailTimeout;   // 上次 read 失败是否仅为 SO_RCVTIMEO 超时
 };

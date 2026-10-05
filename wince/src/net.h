@@ -60,13 +60,30 @@ public:
     // 清空【已扫描/网关推导】候选（保留 UDP 信标 IP）。连接成功后调用：当前连接已采纳，
     // 旧候选若失效会拖累重连（白等 1.5s×N），下次断开重连由扫描线程重新发现。
     static void ClearScanned();
-    // 返回候选 IP 列表：config.txt 显式 IP（若有）优先，其次【高可信候选】——
-    //   含 UDP 信标发现的真实 IP、本机接口网关推导、主动扫描确认。全部动态，无写死地址。
+    // 返回候选 IP 列表：config.txt 显式 IP（若有且【同子网、未连续失败过多】）优先，
+    //   其次【高可信候选】——含 UDP 信标发现的真实 IP、本机接口网关推导、主动扫描确认。全部动态，无写死地址。
     static void GetCandidates(const std::string& configIP, std::vector<std::string>& out);
     // R12：known 候选防拖死开关。手机换了网络（IP 变化）后，known IP 每轮都排最前、
     // 每个白等 1.5s。连续失败多轮时置 true，本轮忽略 known，让信标/网关探测先试；
     // 连接成功（或回到首轮）复位为 false。
     static void SetDeferKnown(bool defer);
+    // R20 接收侧活性：最后一次成功收到对端任意字节的 GetTickCount 时刻。
+    // 心跳线程用 now - LastRecvTick() > 阈值 判断"对端真的死了"，
+    // 而不是看 send 是否成功（TCP 重传会让 send 在对端已死时仍持续成功）。
+    static DWORD LastRecvTick();
+    // R20：新连接建立后重置接收侧活性基准（否则心跳线程会拿上一条连接的
+    //   LastRecvTick 算静默时长，进门就误判"对端静默"而立刻断链）。
+    static void ResetRecvTick();
+    // R20：上次收包失败是否仅为接收超时（对端仍在线，只是安静没发数据）。
+    // true = 安静（继续等）；false = 真断链（应触发重连）。
+    bool lastRecvWasTimeout();
+    // R16 网段健壮性：config.txt 写死 IP 的失败反馈。连上/失败各调一次，
+    // 内部按连续失败次数决定它是否继续占用候选首位（见 GetCandidates 注释）。
+    static void NoteConfigIPResult(bool ok);
+    // 判断 ip 是否与本机任一网卡处于同一 /24 子网。用于剔除"换网后失效的写死 IP"。
+    static bool IsSameSubnet(const char* ip);
+    // 本机当前私有网段主地址（判定网段变化用），取不到返回空串。
+    static std::string LocalIPv4();
 
     // ---- 连接模式（USB 网络共享 vs USB 调试/ADB 隧道）----
     // CONN_MODE_USB_NET：直连手机 8686（原有行为，默认）。

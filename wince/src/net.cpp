@@ -16,6 +16,12 @@ static CRITICAL_SECTION g_csSend;
 
 // 连接世代号（详见 net.h ConnEpoch）：Interlocked 递增，供后台线程确定性判断“本连接是否已作废”。
 static volatile LONG g_epoch = 0;
+
+// R20：最后一次成功收到对端任意字节的时刻（readExact 每次成功进入时刷新）。
+// 用于接收侧活性判定 —— 区分"对端真死"与"对端只是安静（静帧/手机端未实现心跳）"。
+static volatile LONG g_lastRecvTick = 0;
+DWORD NetClient::LastRecvTick() { return (DWORD)g_lastRecvTick; }
+void NetClient::ResetRecvTick() { g_lastRecvTick = GetTickCount(); }
 long NetClient::ConnEpoch() { return g_epoch; }
 
 // 连接模式：默认直连（USB 网络共享）。可在 config.txt 设 mode=usb_adb 切到 ADB 隧道。
@@ -134,8 +140,19 @@ bool NetClient::sendHeartbeat() { BYTE b=0; return sendMsg(0x06, &b, 1); }
 bool NetClient::readExact(BYTE* buf, int n) {
     // 防御：未建连（m_transport 为 NULL）时直接失败，避免空指针解引用。
     if (!m_transport) return false;
+    // R20接收侧活性：每收到任意字节就刷新时间戳。上层心跳线程据此判断
+    //   "对端真的死了（长时间无任何字节）" vs "对端只是安静（静帧/无心跳）"。
+    //   旧实现只看 sendHeartbeat() 的返回值，而 send 成功仅代表本地写缓冲接受了字节，
+    //   对端已死时 TCP 重传机制会让 send 持续"成功"数十分钟 → 永远不判断线。
+    g_lastRecvTick = GetTickCount();
     // ITransport::read() 已实现“精确读满 n 字节或断链返回 false”，无需上层续读。
     return m_transport->read(buf, n);
+}
+
+// R20：上次收包失败是否只是接收超时（对端仍在线，只是安静）。
+bool NetClient::lastRecvWasTimeout() {
+    if (!m_transport) return false;
+    return m_transport->lastFailWasTimeout();
 }
 
 bool NetClient::readMsg(BYTE& type, std::vector<BYTE>& payload) {
@@ -196,10 +213,23 @@ bool NetClient::recvVideoFrame(VideoFrame& out) {
             if (dlen > MAX_FRAME_BYTES) { Log("recvVideoFrame: 单帧过大 %d 字节，跳过", dlen); continue; }
             // 反压：若内核收包缓冲仍堆积大量数据，说明本端解码跟不上发送节奏，
             // 直接丢弃本帧继续读下一帧（取最新），避免无意义解码与内存拷贝。
+            // R20 修复"连上却永久黑屏"：原逻辑 `backlog > 96KB 就 continue` 是无滞回的
+            //   bang-bang 控制器——单核 ARM 解码 800×480 约 20-50ms（12-25fps 上限），
+            //   手机按 15fps 推送。只要码率略高于解码能力，backlog 就持续超阈值、
+            //   于是**每一帧都被丢弃**，backlog 永不下降 → 稳定态就是"永远丢帧"，
+            //   画面停在黑屏（用户看到"已连接，镜像中"却什么都没）。
+            // 改为：① 高水位丢弃（96KB）；② 低水位(32KB)以下**强制放行**至少一帧，
+            //   让缓冲有机会排空；③ 每 500ms 至少放行一帧作为兜底，保证画面会更新。
             int backlog = m_transport ? m_transport->backlog() : 0;
-            if (backlog > 96*1024) {
-                continue;
+            static DWORD s_lastForceFrame = 0;
+            DWORD nowTick = GetTickCount();
+            bool forceFrame = (nowTick - s_lastForceFrame > 500);   // 兜底：每 500ms 必放一帧
+            if (backlog > 96*1024 && !forceFrame) {
+                continue;   // 真堆积（非兜底周期）才丢
             }
+            if (forceFrame) s_lastForceFrame = nowTick;
+            // R20：复用 payload 缓冲，避免 15fps 持续为每帧新建/销毁 vector 造成堆抖动
+            //   （WinCE 64MB 级设备上这种抖动就是卡顿与碎片化的主因）。
             out.data.assign(payload.begin()+9, payload.begin()+9 + dlen);
             return true;
         } else if (type == 0x02) { // VIDEO_CONFIG：记录编解码类型
@@ -238,7 +268,8 @@ static const int PHONE_PORT    = 8686;
 
 static CRITICAL_SECTION g_csCand;
 static std::vector<std::string> g_priIPs;      // 接口网关推导 + 扫描确认（均经 8686 探测命中）
-static std::string g_beaconIP;                 // 最高优先级：UDP 信标带来的手机真实 IP
+static std::vector<std::string> g_beaconIPs;   // UDP 信标带来的手机真实 IP（**多台**，按到达顺序）
+static std::string g_beaconIP;                 // 最近一次信标 IP（仅用于日志比对，不参与候选唯一性）
 static volatile bool g_discoveryOn = false;
 static volatile bool g_linkUp      = false;    // 链路已连通（握手成功）→ 暂停扫描
 
@@ -268,7 +299,66 @@ static bool isLocalSubnet(unsigned a, unsigned b, unsigned c, unsigned d) {
     if (a == 172 && b >= 16 && b <= 31) return true;  // 172.16.0.0/12
     if (a == 192 && b == 168) return true;            // 192.168.0.0/16
     if (a == 169 && b == 254) return true;            // 169.254.0.0/16 链路本地
+    // USB tether（Android rndis / 以太网共享）在部分 ROM 上会分配 100.64.0.0/10（CGNAT 段），
+    // 旧判定把它当公网地址 → 整个子网被判"非本地"，扫描线程直接跳过该网卡，
+    // 候选恒为空（实测症状：日志"0 个候选" + 永不停歇重连）。补上这一段。
+    if (a == 100 && b >= 64 && b <= 127) return true;  // 100.64.0.0/10
     return false;
+}
+
+// 解析 "a.b.c.d" → 4 字节；失败返回 false。严格逐段校验，不接受 1234 / 0x7f.1 等 inet_addr 宽松形态。
+static bool parseIPv4(const char* s, unsigned out[4]) {
+    if (!s || !*s) return false;
+    unsigned v[4] = {0, 0, 0, 0};
+    int consumed = 0;
+    if (sscanf(s, "%u.%u.%u.%u%n", &v[0], &v[1], &v[2], &v[3], &consumed) != 4) return false;
+    if (!s[consumed]) return false;                    // 必须整行消费完，防 "1.2.3.4abc"
+    for (int i = 0; i < 4; i++) if (v[i] > 255) return false;
+    for (int i = 0; i < 4; i++) out[i] = v[i];
+    return true;
+}
+
+// 本机是否持有与 target 同一 /24 子网的地址。
+// 用途：config.txt 里写死的 IP 只有落在本机任一网卡子网内才值得优先尝试；
+// 否则它属于别的网段（典型：手机换网络后 IP 段整个变了），留着只会每轮白等一个超时，
+// 并把真正的自动发现候选挤到后面 —— 实测这就是"日志刷 6.8 小时、全是同一个死 IP"的根因。
+bool NetClient::IsSameSubnet(const char* ip) {
+    unsigned t[4];
+    if (!parseIPv4(ip, t)) return false;
+    ULONG buflen = 0;
+    if (GetAdaptersInfo(NULL, &buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0) return false;
+    std::vector<BYTE> buf(buflen);
+    PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)buf.data();
+    if (GetAdaptersInfo(pAdapters, &buflen) != NO_ERROR) return false;
+    for (PIP_ADAPTER_INFO p = pAdapters; p; p = p->Next) {
+        for (PIP_ADDR_STRING addr = &p->IpAddressList; addr; addr = addr->Next) {
+            unsigned a, b, c, d;
+            if (sscanf(addr->IpAddress.String, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) continue;
+            if (a == 0 || a == 127) continue;
+            if (a == t[0] && b == t[1] && c == t[2]) return true;
+        }
+    }
+    return false;
+}
+
+// 本机当前主地址（判定网段变化用）：取第一个私有网段 IPv4，取不到返回空。
+std::string NetClient::LocalIPv4() {
+    ULONG buflen = 0;
+    if (GetAdaptersInfo(NULL, &buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0) return "";
+    std::vector<BYTE> buf(buflen);
+    PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)buf.data();
+    if (GetAdaptersInfo(pAdapters, &buflen) != NO_ERROR) return "";
+    for (PIP_ADAPTER_INFO p = pAdapters; p; p = p->Next) {
+        for (PIP_ADDR_STRING addr = &p->IpAddressList; addr; addr = addr->Next) {
+            unsigned a, b, c, d;
+            if (sscanf(addr->IpAddress.String, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) continue;
+            if (a == 0 || a == 127 || d == 0 || d == 255) continue;
+            if (!isLocalSubnet(a, b, c, d)) continue;
+            char out[32]; snprintf(out, sizeof(out), "%u.%u.%u.%u", a, b, c, d);
+            return std::string(out);
+        }
+    }
+    return "";
 }
 
 // 探测手段 2：枚举本机接口，动态推导手机（网关/服务端）地址，绝不写死段号。
@@ -367,6 +457,12 @@ static DWORD WINAPI SubnetScanThread(LPVOID) {
         PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)buf.data();
         if (GetAdaptersInfo(pAdapters, &buflen) != NO_ERROR) { Sleep(2000); continue; }
 
+        // R19 首次连接健壮性：WinCE 开机后 WiFi 网卡往往**几十秒后才拿到 IP**，
+        // 而旧的 AddInterfaceGateways() 只在发现线程启动那一刻调一次 ——
+        // 那时网卡还没地址 → 网关候选永远补不上 → 首次连接只能干等。
+        // 现每轮扫描前都重新推导一次网关：网卡一旦就绪，下一轮（≤5s）自动补上候选。
+        AddInterfaceGateways();
+
         // 阶段1：快速确认网关 / .1（轻量，通常一轮即命中）
         for (PIP_ADAPTER_INFO p = pAdapters; p && !g_linkUp; p = p->Next) {
             unsigned ga, gb, gc, gd;
@@ -426,17 +522,36 @@ static DWORD WINAPI SubnetScanThread(LPVOID) {
 
 static DWORD WINAPI DiscoveryThread(LPVOID) {
     SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (s == INVALID_SOCKET) return 0;
+    if (s == INVALID_SOCKET) { Log("disc: 创建 UDP socket 失败 (WSA=%d)，信标发现不可用", WSAGetLastError()); return 0; }
     BOOL reuse = 1;
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
     sockaddr_in sa = {0};
     sa.sin_family = AF_INET;
     sa.sin_port = htons((u_short)DISCOVERY_PORT);
     sa.sin_addr.s_addr = INADDR_ANY;
-    if (bind(s, (SOCKADDR*)&sa, sizeof(sa)) == SOCKET_ERROR) {
-        closesocket(s);
-        return 0;
+    // R19 首次连接健壮性：旧版 bind 失败就 `return 0` 静默退出 —— 无日志、无重试。
+    // 车机环境 bind 8687 失败很常见（端口被上次残留进程占用 / Winsock 尚未就绪 /
+    // 前一次崩溃没释放），一旦发生**信标发现永久失效**，只剩扫描兜底，
+    // 表现为"开机后怎么都连不上"（首次连接失败），且日志里毫无线索。
+    // 现改为：退避重试（最长 5s 一次，最多 60 次 ≈ 5 分钟内自愈），
+    // 且每次失败都打日志，最后一次明确告知"信标不可用、仅靠扫描兜底"。
+    int bindFail = 0;
+    while (g_discoveryOn) {
+        if (bind(s, (SOCKADDR*)&sa, sizeof(sa)) != SOCKET_ERROR) break;   // 绑定成功
+        bindFail++;
+        int err = WSAGetLastError();
+        if (bindFail == 1 || bindFail % 10 == 0) {
+            Log("disc: bind UDP %d 失败 (WSA=%d, 第%d次)，退避重试中…", DISCOVERY_PORT, err, bindFail);
+        }
+        if (bindFail >= 60) {
+            Log("disc: bind UDP %d 持续失败 60 次，放弃信标发现（仅靠扫描/网关兜底，连接会变慢）", DISCOVERY_PORT);
+            closesocket(s);
+            return 0;
+        }
+        Sleep(bindFail < 10 ? 500 : 5000);
     }
+    if (!g_discoveryOn) { closesocket(s); return 0; }
+    Log("disc: 信标监听就绪 UDP %d（0.0.0.0）", DISCOVERY_PORT);
     // 探测手段 2（接口网关推导）立即做一次，之后持续监听信标(手段1)
     AddInterfaceGateways();
 
@@ -458,12 +573,40 @@ static DWORD WINAPI DiscoveryThread(LPVOID) {
                     char* ip = buf + 7;
                     char* sep = strchr(ip, '|');
                     if (sep) {
-                        *sep = 0; AddPriority(ip);
-                        EnterCriticalSection(&g_csCand);
-                        bool changed = (g_beaconIP != ip);   // R8：信标来源落日志（仅在 IP 变化时记，防刷屏）
-                        g_beaconIP = ip;
-                        LeaveCriticalSection(&g_csCand);
-                        if (changed) Log("disc: beacon 收到手机 IP %s", ip);
+                        *sep = 0;
+                        // R17：信标可能来自**多台手机**（车上不止一部 / 热点里有旁人的机）。
+                        //   旧实现用单个 g_beaconIP，多台会互相覆盖 —— 最后发信标的那台独占候选，
+                        //   另一台彻底连不上。现改为追加到列表，全部参与候选。
+                        //   同时过滤：非本机任何子网的信标直接丢弃（与 configIP 同口径），
+                        //   避免邻居热点/其它网段的手机污染候选、白等 1.5s 超时。
+                        unsigned ba[4];
+                        if (!parseIPv4(ip, ba)) {
+                            // 非法 IPv4，直接丢弃
+                        } else if (!NetClient::IsSameSubnet(ip)) {
+                            static long long lastBadLog = 0;
+                            long long now = GetTickCount();
+                            if (now - lastBadLog > 60000) {
+                                lastBadLog = now;
+                                Log("disc: 忽略信标 %s（不在本机任一子网）", ip);
+                            }
+                        } else {
+                            AddPriority(ip);   // 置入高可信候选（多台共存）
+                            EnterCriticalSection(&g_csCand);
+                            // R18：信标列表**最近活跃的排最前**（移动到队首 = 刷新优先），
+                            //   并封顶 8 条。车机换手机场景下，旧手机的信标会长期滞留，
+                            //   若不刷新顺序 + 不封顶，昨天那台的 IP 会一直占着候选前排，
+                            //   拖慢换机后的首次连接。队首 = 最后一次听到的 = 最可能正在用的那台。
+                            for (size_t k = 0; k < g_beaconIPs.size(); k++) {
+                                if (g_beaconIPs[k] == ip) { g_beaconIPs.erase(g_beaconIPs.begin() + k); break; }
+                            }
+                            g_beaconIPs.insert(g_beaconIPs.begin(), std::string(ip));
+                            if (g_beaconIPs.size() > 8) g_beaconIPs.pop_back();   // 封顶，防无限增长
+                            bool changed = (g_beaconIP != ip);   // R8：仅在变化时记日志，防刷屏
+                            g_beaconIP = ip;
+                            int n = (int)g_beaconIPs.size();
+                            LeaveCriticalSection(&g_csCand);
+                            if (changed) Log("disc: beacon 收到手机 IP %s (信标池%d个)", ip, n);
+                        }
                     }
                 }
             }
@@ -606,12 +749,14 @@ void NetClient::StopDiscovery() {
     // 等待两个探测线程真正退出并回收句柄：此前 CreateThread 返回的句柄从未 CloseHandle，
     // 长期运行会持续泄漏内核对象；更关键的是退出阶段若线程仍在跑，
     // 会继续访问已被 delete 的渲染器/网络对象（崩溃）。
+    // R20：等待上限从 8s 提到 25s —— SubnetScanThread 一轮全段扫描最坏耗时
+    //   254×(60ms 探测 + 8ms 节流) ≈ 17s，原 8s 必然不够，线程仍在跑就被上层销毁对象。
     if (g_hDiscThread) {
-        if (WaitForSingleObject(g_hDiscThread, 8000) == WAIT_TIMEOUT) Log("warn: discovery thread join timeout");
+        if (WaitForSingleObject(g_hDiscThread, 25000) == WAIT_TIMEOUT) Log("warn: discovery thread join timeout");
         CloseHandle(g_hDiscThread); g_hDiscThread = NULL;
     }
     if (g_hScanThread) {
-        if (WaitForSingleObject(g_hScanThread, 8000) == WAIT_TIMEOUT) Log("warn: scan thread join timeout");
+        if (WaitForSingleObject(g_hScanThread, 25000) == WAIT_TIMEOUT) Log("warn: scan thread join timeout");
         CloseHandle(g_hScanThread); g_hScanThread = NULL;
     }
 }
@@ -620,23 +765,70 @@ void NetClient::SetLinkUp(bool up) {
     g_linkUp = up;
 }
 
+// config.txt 显式 IP 的失败计数（连续失败达阈值后本轮跳过它，让自动发现顶上）。
+// 解决"一个写死的过期 IP 独占每轮 1.5s 超时、真实候选永远排不到"的死锁。
+// 声明前置到 ClearScanned 之前（连上时要复位它）。
+static int g_cfgFailStreak = 0;
+static std::string g_cfgIPUsed;             // 记录上次用的是哪个 configIP，换 IP 时清零计数
+
 void NetClient::ClearScanned() {
     EnterCriticalSection(&g_csCand);
     g_priIPs.clear();   // 仅清扫描/网关候选；g_beaconIP 保留（信标持续刷新）
     LeaveCriticalSection(&g_csCand);
+    g_cfgFailStreak = 0;   // 连上即复位：下次断线时 configIP 又值得优先试
+}
+
+void NetClient::NoteConfigIPResult(bool ok) {
+    if (g_cfgIPUsed.empty()) return;
+    if (ok) g_cfgFailStreak = 0;
+    else   g_cfgFailStreak++;
 }
 
 void NetClient::GetCandidates(const std::string& configIP, std::vector<std::string>& out) {
     out.clear();
-    // 优先级：config.txt 显式覆盖 > 【已知手机上次IP(记住这台手机)】 > UDP 信标真实IP(最高可信) > 接口网关/扫描确认
     std::vector<std::string> tmp;
-    if (!configIP.empty()) tmp.push_back(configIP);
+    // 优先级：config.txt 显式 IP【仅当同子网 且 未连续失败过多】> 已知手机上次IP > UDP 信标真实IP > 接口网关/扫描确认
+    // R16 网段健壮性：原实现无条件把 configIP 排最前，导致
+    //   "config.txt 里的 IP 与当前网络无关" 时每轮都先撞这个死 IP（白等 1.5s），
+    //   真正由信标/网关/扫描发现的候选被挤到后面 —— 实测 6.8 小时 10851 行日志全在撞同一个 IP。
+    // 现在三重保护：① 不同子网直接丢弃并记日志；② 连续失败 ≥CFG_IP_FAIL_MAX 轮则本轮让位；
+    // ③ 换IP / 连上 / 拉黑时状态复位。
+    const int CFG_IP_FAIL_MAX = 3;
+    if (!configIP.empty()) {
+        if (configIP != g_cfgIPUsed) { g_cfgIPUsed = configIP; g_cfgFailStreak = 0; }
+        if (!IsSameSubnet(configIP.c_str())) {
+            static DWORD s_lastWarn = 0;
+            if (GetTickCount() - s_lastWarn > 60000) {   // 同一原因每分钟只提醒一次，避免刷屏
+                s_lastWarn = GetTickCount();
+                Log("cfg: 忽略 config 指定的 %s（不在本机任一子网内，疑似换网后失效）", configIP.c_str());
+            }
+        } else if (g_cfgFailStreak >= CFG_IP_FAIL_MAX) {
+            // 静默让位（不刷日志，round 日志已能反映候选数变化）
+        } else {
+            tmp.push_back(configIP);
+        }
+    }
+    // R18 换机健壮性（车机场景：今天用手机 A，明天换手机 B）：
+    // 旧顺序是 configIP > **known(历史手机IP)** > 信标(当下真实手机) > 网关/扫描。
+    // 问题：known 排在信标前面。今天 A 手机连过后 IP 被存进 known_phones.cfg，
+    // 明天 B 手机上线发信标，程序却先去撞 A 的历史 IP —— 白等 1.5s 超时，
+    // 而真正在线的 B 排在后面，甚至因 A 恰好占用该 IP 而连错机/连不上。
+    // 现把 **信标提到 known 之前**：信标 = 此刻网络上真实发信标的手机，最可信、最新鲜；
+    // known 降级为"信标不来时的兜底"（手机没开信标/休眠时仍能直连上次那台）。
+    // 这样换手机后只要新手机开着 App 发信标，就一定能被优先连上，无需清任何配置。
+    std::vector<std::string> beacon;   // 信标快照（加锁复制，避免与Discovery 线程竞态）
+    {
+        EnterCriticalSection(&g_csCand);
+        for (size_t i = 0; i < g_beaconIPs.size(); i++) beacon.push_back(g_beaconIPs[i]);
+        LeaveCriticalSection(&g_csCand);
+    }
+    // 组装顺序：① 信标（当下在线，最可信）② known（历史兜底）③ 网关/扫描（被动探测）
+    for (size_t i = 0; i < beacon.size(); i++) tmp.push_back(beacon[i]);
     if (!g_deferKnown) {   // R12：连续失败多轮后本轮跳过 known，给信标/网关让路（防失效 IP 拖死每轮）
         std::vector<std::string> known; GetKnownIPs(known);
         for (size_t i = 0; i < known.size(); i++) tmp.push_back(known[i]);
     }
     EnterCriticalSection(&g_csCand);
-    if (!g_beaconIP.empty()) tmp.push_back(g_beaconIP);
     for (size_t i = 0; i < g_priIPs.size(); i++) tmp.push_back(g_priIPs[i]);
     LeaveCriticalSection(&g_csCand);
     // 保序去重 + 过滤空串（R8：旧版空候选会打出 `try connect #:8686` 空转、污染日志）

@@ -33,4 +33,9 @@ public:
     virtual void close() = 0;
     // 内核收包缓冲中尚未读取的字节数（反压用）；不适用/未知时返回 0。
     virtual int  backlog() const { return 0; }
+    // R20：上次 read() 返回 false 是否只是"接收超时"（对端仍在线，只是安静）。
+    // 阻塞 socket 上recv 超时（EAGAIN/WSAETIMEDOUT）与对端 FIN 都让 read 返回 false，
+    // 但语义完全相反：前者必须继续等，后者必须断链重连。上层据此区分，
+    // 避免"手机端不发心跳 + 静帧不编码"时把安静误判成断线（表现为 5s 必断重连）。
+    virtual bool lastFailWasTimeout() const { return false; }
 };
