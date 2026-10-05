@@ -258,6 +258,9 @@ static DWORD WINAPI ConnThread(LPVOID) {
     // 旧版日志里没有这条，导致只能靠猜（实测踩了 6.8 小时）。
     Log("ConnThread start, configIP='%s' port=%d mode=%s localIP=%s",
         cfg.c_str(), g_cfgPort, NetClient::ModeName(), NetClient::LocalIPv4().c_str());
+    // R21 崩溃哨兵：真车实测日志稳定停在上一行，下一条 first GetCandidates 从未出现。
+    // 在两者之间逐行打点，下次再闪退时能精确知道死在哪一步（而不是只知道"在 GetCandidates 里"）。
+    Log("[stage] sentinel A: 即将进入 first GetCandidates");
     // R14：立刻打第一条候选日志。旧版若 GetCandidates 返回空，会continue 到 Sleep(1000)
     // 再循环，而唯一能看出"卡在哪"的 round 日志在cands.empty() 分支之后——
     // 候选一直为空时日志里只有"未发现手机"，看不出网卡/网关枚举是否成功。
@@ -268,6 +271,7 @@ static DWORD WINAPI ConnThread(LPVOID) {
         for (size_t i = 0; i < probe.size(); i++) { if (i) joined += ", "; joined += probe[i]; }
         Log("[stage] first GetCandidates -> %d 个候选 [%s]", (int)probe.size(), joined.c_str());
     }
+    Log("[stage] sentinel B: first GetCandidates 已返回，进入主循环");
 
     while (g_running) {
         bool ok = false;

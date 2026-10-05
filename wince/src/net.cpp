@@ -322,13 +322,36 @@ static bool parseIPv4(const char* s, unsigned out[4]) {
 // 用途：config.txt 里写死的 IP 只有落在本机任一网卡子网内才值得优先尝试；
 // 否则它属于别的网段（典型：手机换网络后 IP 段整个变了），留着只会每轮白等一个超时，
 // 并把真正的自动发现候选挤到后面 —— 实测这就是"日志刷 6.8 小时、全是同一个死 IP"的根因。
+// R21 崩溃修复（2026-10-05 真车实测闪退）：真机日志稳定停在 `ConnThread start`，
+// 下一条 `first GetCandidates` 从未出现 → 进程死在 LocalIPv4()/GetCandidates() 里的
+// GetAdaptersInfo 路径上。沙箱 CE7 无网卡走的是"调用直接失败"分支，所以复现不出来；
+// 真机 CE6 有网卡，buflen 由内核填入，若该值异常大（脏数据/结构版本不匹配），
+// `std::vector<BYTE> buf(buflen)` 会一次巨量分配 → 单核 64MB 车机上立刻 OOM 闪退。
+// 三重防御：① buflen 上限封顶（IP_ADAPTER_INFO 链正常几百字节，给 64KB 余量足够）；
+// ② 分配失败不抛异常直接返回；③ 分配后 memset 清零，避免未初始化结构里的 Next 野指针。
+static ULONG AdapterBufLen(ULONG* out) {
+    ULONG need = 0;
+    *out = 0;
+    ULONG rc = GetAdaptersInfo(NULL, &need);
+    if (need == 0) return rc;
+    if (need > 64 * 1024) {
+        Log("net: GetAdaptersInfo 报异常 buflen=%u，超过 64KB 上限，按无效处理", (unsigned)need);
+        return ERROR_BUFFER_OVERFLOW;
+    }
+    *out = need;
+    return rc;
+}
+
 bool NetClient::IsSameSubnet(const char* ip) {
     unsigned t[4];
     if (!parseIPv4(ip, t)) return false;
     ULONG buflen = 0;
-    if (GetAdaptersInfo(NULL, &buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0) return false;
-    std::vector<BYTE> buf(buflen);
-    PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)buf.data();
+    if (AdapterBufLen(&buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0) return false;
+    std::vector<BYTE> buf;
+    try { buf.resize(buflen); } catch (...) { return false; }
+    if (buf.empty()) return false;
+    memset(&buf[0], 0, buflen);
+    PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)&buf[0];
     if (GetAdaptersInfo(pAdapters, &buflen) != NO_ERROR) return false;
     for (PIP_ADAPTER_INFO p = pAdapters; p; p = p->Next) {
         for (PIP_ADDR_STRING addr = &p->IpAddressList; addr; addr = addr->Next) {
@@ -344,9 +367,12 @@ bool NetClient::IsSameSubnet(const char* ip) {
 // 本机当前主地址（判定网段变化用）：取第一个私有网段 IPv4，取不到返回空。
 std::string NetClient::LocalIPv4() {
     ULONG buflen = 0;
-    if (GetAdaptersInfo(NULL, &buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0) return "";
-    std::vector<BYTE> buf(buflen);
-    PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)buf.data();
+    if (AdapterBufLen(&buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0) return "";
+    std::vector<BYTE> buf;
+    try { buf.resize(buflen); } catch (...) { return ""; }
+    if (buf.empty()) return "";
+    memset(&buf[0], 0, buflen);
+    PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)&buf[0];
     if (GetAdaptersInfo(pAdapters, &buflen) != NO_ERROR) return "";
     for (PIP_ADAPTER_INFO p = pAdapters; p; p = p->Next) {
         for (PIP_ADDR_STRING addr = &p->IpAddressList; addr; addr = addr->Next) {
@@ -366,10 +392,13 @@ std::string NetClient::LocalIPv4() {
 // （如 192.168.43.1）会被当成手机反复连、每轮白等 1.5s。路由器没有 8686，探测必失败，自然被排除。
 static void AddInterfaceGateways() {
     ULONG buflen = 0;
-    if (GetAdaptersInfo(NULL, &buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0)
+    if (AdapterBufLen(&buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0)
         return;
-    std::vector<BYTE> buf(buflen);
-    PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)buf.data();
+    std::vector<BYTE> buf;
+    try { buf.resize(buflen); } catch (...) { return; }
+    if (buf.empty()) return;
+    memset(&buf[0], 0, buflen);
+    PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)&buf[0];
     if (GetAdaptersInfo(pAdapters, &buflen) != NO_ERROR) return;
     for (PIP_ADAPTER_INFO p = pAdapters; p; p = p->Next) {
         // 优先使用网卡自身上报的真实网关（USB 共享下即手机地址）；探测通才加
@@ -450,11 +479,14 @@ static DWORD WINAPI SubnetScanThread(LPVOID) {
         if (g_linkUp) { Sleep(1000); continue; }   // 已连上：暂停扫描，不浪费资源/不打扰手机
 
         ULONG buflen = 0;
-        if (GetAdaptersInfo(NULL, &buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0) {
+        if (AdapterBufLen(&buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0) {
             Sleep(2000); continue;
         }
-        std::vector<BYTE> buf(buflen);
-        PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)buf.data();
+        std::vector<BYTE> buf;
+        try { buf.resize(buflen); } catch (...) { Sleep(2000); continue; }
+        if (buf.empty()) { Sleep(2000); continue; }
+        memset(&buf[0], 0, buflen);
+        PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)&buf[0];
         if (GetAdaptersInfo(pAdapters, &buflen) != NO_ERROR) { Sleep(2000); continue; }
 
         // R19 首次连接健壮性：WinCE 开机后 WiFi 网卡往往**几十秒后才拿到 IP**，
