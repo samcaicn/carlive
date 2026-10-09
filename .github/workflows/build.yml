@@ -172,6 +172,34 @@ jobs:
             wince/tuptup-ba.exe
             wince/tuptup-bb.exe
             wince/tuptup-bc.exe
+      # R31 ADB 模式 5 连测（test1-5.exe，各改一个变量）：
+      #   test1 = crashlog 关闭 / test2 = R13 线程原样 / test3 = 256KB 栈无标志
+      #   test4 = readConfig 行级打点 / test5 = 单线程探针（无发现线程）
+      - name: Build test1-5 variants (ADB mode)
+        run: |
+          cd wince
+          chmod +x build_wince.sh
+          for v in 1 2 3 4 5; do
+            VARIANT=test$v ./build_wince.sh
+          done
+      - name: Verify test1-5 PE
+        run: |
+          for f in test1 test2 test3 test4 test5; do
+            ls -la wince/$f.exe
+            /opt/cegcc-arm/bin/arm-mingw32ce-objdump -f wince/$f.exe \
+              | grep -qi "architecture: arm" || { echo "ERROR: $f not ARM"; exit 1; }
+          done
+          echo "test variants: ARM OK"
+      - name: Upload test1-5 variants
+        uses: actions/upload-artifact@v4
+        with:
+          name: tuptup-wince-tests
+          path: |
+            wince/test1.exe
+            wince/test2.exe
+            wince/test3.exe
+            wince/test4.exe
+            wince/test5.exe
 
   source-check:
     name: Source sanity check

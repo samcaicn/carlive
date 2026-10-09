@@ -95,7 +95,22 @@ static void BuildSingleInstanceName(WCHAR* out, DWORD cap) {
 // R28：变体标记。SD 卡上三个 exe 界面长得一模一样，车机上跑起来根本分不清
 // 当前到底在跑哪个 —— 一旦混着测，回来的日志对不上exe，实验等于白做。
 // 把标记打进窗口标题与状态首屏，人眼一眼可辨。
-#if defined(USB_NET_ONLY)
+#if defined(TLTP_TEST1)
+static const char*  EXE_TAG  = "test1";
+static const WCHAR* EXE_TAGW = L"test1";
+#elif defined(TLTP_TEST2)
+static const char*  EXE_TAG  = "test2";
+static const WCHAR* EXE_TAGW = L"test2";
+#elif defined(TLTP_TEST3)
+static const char*  EXE_TAG  = "test3";
+static const WCHAR* EXE_TAGW = L"test3";
+#elif defined(TLTP_TEST4)
+static const char*  EXE_TAG  = "test4";
+static const WCHAR* EXE_TAGW = L"test4";
+#elif defined(TLTP_TEST5)
+static const char*  EXE_TAG  = "test5";
+static const WCHAR* EXE_TAGW = L"test5";
+#elif defined(USB_NET_ONLY)
 static const char*  EXE_TAG  = "usbnet";
 static const WCHAR* EXE_TAGW = L"usbnet";
 #elif defined(TLTP_BISECT_NO_CRASHLOG)
@@ -198,14 +213,17 @@ static std::string readConfig() {
             WCHAR* p = wcsrchr(path, L'\\');
             if (p) wcscpy(p + 1, L"config.txt");
             else wcscpy(path, L"config.txt");   // R15：exe 在根目录（无 \）时回退到当前目录
+            TLTP_FINE_STAGE("readCfg:open");    // test4：下面 CreateFile 若死，停在这
             HANDLE hf = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
         if (hf != INVALID_HANDLE_VALUE) {
+            TLTP_FINE_STAGE("readCfg:read");    // test4：读循环若死，停在这
             char buf[512] = {0}; DWORD rd = 0;
             std::string content;
             while (ReadFile(hf, buf, sizeof(buf) - 1, &rd, NULL) && rd > 0) {
                 buf[rd] = 0; content += buf;
             }
             CloseHandle(hf);
+            TLTP_FINE_STAGE("readCfg:parse");   // test4：解析循环若死，停在这
             size_t pos = 0;
             while (pos < content.size()) {
                 size_t nl = content.find('\n', pos);
@@ -249,6 +267,7 @@ static std::string readConfig() {
             }
         }
     }
+    TLTP_FINE_STAGE("readCfg:done");        // test4：活着走出 readConfig 的标记
     return ip;
 }
 

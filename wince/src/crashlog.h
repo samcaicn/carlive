@@ -43,3 +43,12 @@ void CrashSetStage(const char* stage);
 #ifdef TLTP_BISECT_NO_CRASHLOG
 #define CrashSetStage(stage) ((void)0)
 #endif
+
+// 【测试变体 test4】细粒度打点开关：在 readConfig 内部每个小步骤设 stage，
+// 若 test4 闪退，crash.log 最后停在哪个子步骤就把死点缩到行级。
+// 其他变体不受影响（FINE_STAGE 恒为空操作）。
+#ifdef TLTP_TEST_FINE_STAGE
+#define TLTP_FINE_STAGE(s) CrashSetStage(s)
+#else
+#define TLTP_FINE_STAGE(s) ((void)0)
+#endif

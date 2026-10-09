@@ -829,8 +829,15 @@ void NetClient::StartDiscovery() {
     // R29：ADB 模式下彻底不跑子网扫描线程 —— 它内部唯一的网卡枚举用途是为
     // usb_net 推导候选，而 ADB 模式候选全来自 UDP 8687 信标（无需 GetAdaptersInfo，
     // 也避免并发踩堆导致 ConnThread 崩溃）。usb_net 模式仍照常扫描。
+#ifndef TLTP_TEST_NO_DISCOVERY
     if (!adbMode())
         g_hScanThread = TltpCreateThread(SubnetScanThread, NULL);
+#else
+    // 【测试变体 test5】连信标线程也不 spawn —— ConnThread 成为唯一后台线程。
+    // 若 test5 不闪退而其他变体闪退 → 元凶是跨线程交互（crashlog 并发写 /
+    // 堆竞争），而非任何单线程内的代码。代价：无法发现手机，仅用于启动定位。
+    Log("test5: discovery disabled (single-thread probe)");
+#endif
 }
 
 void NetClient::StopDiscovery() {

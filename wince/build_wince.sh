@@ -49,7 +49,28 @@ case "$VARIANT" in
     EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
     OUT="$SCRIPT_DIR/tuptup-bc.exe"
     ;;
-  *) echo "ERROR: 未知 VARIANT=$VARIANT（支持: full | usbnet | bisect-a | bisect-b | bisect-c）" >&2; exit 2 ;;
+  # R31 ADB 模式 5 连测：每个只改一个变量，test1-5.exe 逐个上车定位闪退根因。
+  test1)   # crashlog 模块关闭 → 验 CrashSetStage 无锁并发写是否有罪
+    EXTRA_FLAGS="-DTLTP_TEST1 -DTLTP_BISECT_NO_CRASHLOG"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
+    OUT="$SCRIPT_DIR/test1.exe" ;;
+  test2)   # 线程创建回退 R13 原样 → 验 R23 栈 reservation 标志是否有罪
+    EXTRA_FLAGS="-DTLTP_TEST2 -DTLTP_BISECT_PLAIN_THREAD"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
+    OUT="$SCRIPT_DIR/test2.exe" ;;
+  test3)   # 256KB 大栈不带标志 → test2 存活时的修复候选
+    EXTRA_FLAGS="-DTLTP_TEST3 -DTLTP_BISECT_BIGSTACK"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
+    OUT="$SCRIPT_DIR/test3.exe" ;;
+  test4)   # readConfig 内部行级打点 → 若仍闪退，crash.log 直接给出死点行
+    EXTRA_FLAGS="-DTLTP_TEST4 -DTLTP_TEST_FINE_STAGE"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
+    OUT="$SCRIPT_DIR/test4.exe" ;;
+  test5)   # 不 spawn 任何发现线程（单线程探针，连不上手机）→ 验跨线程交互
+    EXTRA_FLAGS="-DTLTP_TEST5 -DTLTP_TEST_NO_DISCOVERY"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
+    OUT="$SCRIPT_DIR/test5.exe" ;;
+  *) echo "ERROR: 未知 VARIANT=$VARIANT（支持: full | usbnet | bisect-a/b/c | test1-5）" >&2; exit 2 ;;
 esac
 
 echo ">> building $OUT  (VARIANT=$VARIANT)"
