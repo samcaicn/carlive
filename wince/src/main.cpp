@@ -116,15 +116,6 @@ static const WCHAR* EXE_TAGW = L"test6";
 #elif defined(USB_NET_ONLY)
 static const char*  EXE_TAG  = "usbnet";
 static const WCHAR* EXE_TAGW = L"usbnet";
-#elif defined(TLTP_BISECT_NO_CRASHLOG)
-static const char*  EXE_TAG  = "bisect-a";
-static const WCHAR* EXE_TAGW = L"bisect-a";
-#elif defined(TLTP_BISECT_PLAIN_THREAD)
-static const char*  EXE_TAG  = "bisect-b";
-static const WCHAR* EXE_TAGW = L"bisect-b";
-#elif defined(TLTP_BISECT_BIGSTACK)
-static const char*  EXE_TAG  = "bisect-c";
-static const WCHAR* EXE_TAGW = L"bisect-c";
 #else
 static const char*  EXE_TAG  = "full";
 static const WCHAR* EXE_TAGW = L"full";
@@ -380,12 +371,20 @@ static DWORD WINAPI ConnThread(LPVOID) {
     // 到这里已经连续猜错三次（R21 猜OOM、R22 猜嵌套加锁、R23 猜栈），
     // 不能再靠推断，必须让崩溃现场自己说话：CrashSetStage 写入的步骤名
     // 会由 SetUnhandledExceptionFilter 在崩溃时落到 crash.log 的 stage= 字段。
-    CrashSetStage("ConnThread:readConfig");
     int failRounds = 0;   // 连续连接失败轮次（用于退避，成功即清零）
-    // R-debug（test6）：不再在 ConnThread 内调用 readConfig（真车实测此处必闪退），
-    // 改为使用 WinMain 已读取并缓存的全局 g_cfgIP。
+    // R33：干净的 test1-6 诊断矩阵。
+    //   · 复现路径（TLTP_REPRO_CONF，test1/3/4/5）：在 ConnThread 内直接调用 readConfig
+    //     —— 这是 R32 真车日志定位出的闪退触发点（从子线程调 readConfig 必崩，主线程调则正常）。
+    //   · 修复路径（test2/6，默认）：config 已在 WinMain 读取并缓存到全局 g_cfgIP，
+    //     ConnThread 直接复用，彻底避开“从子线程调 readConfig”这一触发点。
+#if defined(TLTP_REPRO_CONF)
+    CrashSetStage("ConnThread:readConfig");
+    Log("[dbg] CT: 复现路径——ConnThread 内直接调 readConfig");
+    std::string cfg = readConfig();
+#else
     Log("[dbg] CT: 取全局 cfgIP='%s' mode=%d", g_cfgIP.c_str(), g_cfgMode);
     std::string cfg = g_cfgIP;
+#endif
     CrashSetStage("ConnThread:SetMode");
     if (g_cfgMode != NetClient::GetMode()) NetClient::SetMode(g_cfgMode);
     Log("[dbg] CT: SetMode 完成");

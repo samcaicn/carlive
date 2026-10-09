@@ -101,96 +101,26 @@ jobs:
       image: ghcr.io/enlyze/windows-ce-build-environment-arm
     steps:
       - uses: actions/checkout@v4
-      - name: Build tuptup.exe with CeGCC (arm-mingw32ce, GCC 9.3)
+      - name: Build test1-6 variants (clean diagnostic battery)
         run: |
           cd wince
           chmod +x build_wince.sh
-          ./build_wince.sh
-      - name: Verify PE is ARM WinCE
-        run: |
-          OD=/opt/cegcc-arm/bin/arm-mingw32ce-objdump
-          "$OD" -f wince/tuptup.exe | grep -qi "architecture: arm" || { echo "ERROR: not ARM architecture"; exit 1; }
-          echo "ARM architecture: OK"
-          # 解析 PE 头：machine 在 pe+4，subsystem 在 pe+24+68（Windows CE = 9）
-          if command -v od >/dev/null 2>&1; then
-            pe=$(od -An -tu4 -j60 -N4 wince/tuptup.exe | tr -d ' ')
-            subs=$(od -An -tu2 -j$((pe + 92)) -N2 wince/tuptup.exe | tr -d ' ')
-            echo "subsystem=$subs (9 = Windows CE GUI)"
-            [ "$subs" = "9" ] || { echo "ERROR: subsystem is not 9 (Windows CE)"; exit 1; }
-          else
-            echo "od 不可用，仅做软性检查："; "$OD" -p wince/tuptup.exe | grep -i subsystem || true
-          fi
-          echo "OK: ARM Windows CE PE produced"
-      - name: Upload WinCE exe
-        uses: actions/upload-artifact@v4
-        with:
-          name: tuptup-wince-exe
-          path: wince/tuptup.exe
-      # R27：同时产出「单 USB 共享网络」变体。SD 卡上要与完整版做 A/B 对比：
-      # 该变体不含 ADB 隧道，可排除 ADB 模块本身导致真车崩溃的可能。
-      - name: Build usbnet-only variant (no ADB)
-        run: |
-          cd wince
-          chmod +x build_wince.sh
-          VARIANT=usbnet ./build_wince.sh
-      - name: Verify usbnet variant PE
-        run: |
-          ls -la wince/tuptup-usbnet.exe
-          /opt/cegcc-arm/bin/arm-mingw32ce-objdump -f wince/tuptup-usbnet.exe \
-            | grep -qi "architecture: arm" || { echo "ERROR: usbnet variant not ARM"; exit 1; }
-          echo "usbnet variant: ARM OK"
-      - name: Upload usbnet variant
-        uses: actions/upload-artifact@v4
-        with:
-          name: tuptup-wince-usbnet-exe
-          path: wince/tuptup-usbnet.exe
-      # R30 二分定位：一轮出 3 个变体（每个只改一个嫌疑变量），SD 卡逐个点，
-      # 谁活谁死立即收窄真车闪退根因：
-      #   ba = CrashSetStage 空操作   → 验 crashlog 模块（无锁静态缓冲被多线程并发写）
-      #   bb = R13 原样线程创建       → 验 R23 STACK_SIZE_PARAM_IS_A_RESERVATION 标志
-      #   bc = 显式 256KB 栈不带标志  → bb 存活时的正式修复候选
-      - name: Build bisect variants (a/b/c)
-        run: |
-          cd wince
-          chmod +x build_wince.sh
-          VARIANT=bisect-a ./build_wince.sh
-          VARIANT=bisect-b ./build_wince.sh
-          VARIANT=bisect-c ./build_wince.sh
-      - name: Verify bisect variants PE
-        run: |
-          for f in tuptup-ba tuptup-bb tuptup-bc; do
-            ls -la wince/$f.exe
-            /opt/cegcc-arm/bin/arm-mingw32ce-objdump -f wince/$f.exe \
-              | grep -qi "architecture: arm" || { echo "ERROR: $f not ARM"; exit 1; }
-          done
-          echo "bisect variants: ARM OK"
-      - name: Upload bisect variants
-        uses: actions/upload-artifact@v4
-        with:
-          name: tuptup-wince-bisect
-          path: |
-            wince/tuptup-ba.exe
-            wince/tuptup-bb.exe
-            wince/tuptup-bc.exe
-      # R31 ADB 模式 5 连测（test1-5.exe，各改一个变量）：
-      #   test1 = crashlog 关闭 / test2 = R13 线程原样 / test3 = 256KB 栈无标志
-      #   test4 = readConfig 行级打点 / test5 = 单线程探针（无发现线程）
-      - name: Build test1-5 variants (ADB mode)
-        run: |
-          cd wince
-          chmod +x build_wince.sh
-          for v in 1 2 3 4 5; do
+          for v in 1 2 3 4 5 6; do
             VARIANT=test$v ./build_wince.sh
           done
-      - name: Verify test1-5 PE
+      - name: Verify test1-6 PE (ARM WinCE, subsystem=9)
         run: |
-          for f in test1 test2 test3 test4 test5; do
+          for f in test1 test2 test3 test4 test5 test6; do
             ls -la wince/$f.exe
             /opt/cegcc-arm/bin/arm-mingw32ce-objdump -f wince/$f.exe \
               | grep -qi "architecture: arm" || { echo "ERROR: $f not ARM"; exit 1; }
           done
-          echo "test variants: ARM OK"
-      - name: Upload test1-5 variants
+          pe=$(od -An -tu4 -j60 -N4 wince/test1.exe | tr -d ' ')
+          subs=$(od -An -tu2 -j$((pe + 92)) -N2 wince/test1.exe | tr -d ' ')
+          echo "test1 subsystem=$subs (9 = Windows CE GUI)"
+          [ "$subs" = "9" ] || { echo "ERROR: subsystem is not 9 (Windows CE)"; exit 1; }
+          echo "test1-6: ARM Windows CE PE produced"
+      - name: Upload test1-6 variants
         uses: actions/upload-artifact@v4
         with:
           name: tuptup-wince-tests
@@ -200,24 +130,7 @@ jobs:
             wince/test3.exe
             wince/test4.exe
             wince/test5.exe
-      # R32 诊断+修复候选 test6：配置改在 WinMain 读并存全局，ConnThread 不再调 readConfig；
-      # 细粒度 Log 定位死点；crashlog 加锁消除多线程并发写竞争（真车闪退强嫌疑点）。
-      - name: Build test6 variant (ADB mode)
-        run: |
-          cd wince
-          chmod +x build_wince.sh
-          VARIANT=test6 ./build_wince.sh
-      - name: Verify test6 PE
-        run: |
-          ls -la wince/test6.exe
-          /opt/cegcc-arm/bin/arm-mingw32ce-objdump -f wince/test6.exe \
-            | grep -qi "architecture: arm" || { echo "ERROR: test6 not ARM"; exit 1; }
-          echo "test6 variant: ARM OK"
-      - name: Upload test6 variant
-        uses: actions/upload-artifact@v4
-        with:
-          name: tuptup-wince-test6
-          path: wince/test6.exe
+            wince/test6.exe
 
   source-check:
     name: Source sanity check
