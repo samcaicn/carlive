@@ -70,6 +70,10 @@ case "$VARIANT" in
     EXTRA_FLAGS="-DTLTP_TEST5 -DTLTP_TEST_NO_DISCOVERY"
     EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
     OUT="$SCRIPT_DIR/test5.exe" ;;
+  test6)   # 诊断+修复候选：config 改在 WinMain 读并存全局，ConnThread 不再调 readConfig；细粒度 Log 定位死点
+    EXTRA_FLAGS="-DTLTP_TEST6"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
+    OUT="$SCRIPT_DIR/test6.exe" ;;
   *) echo "ERROR: 未知 VARIANT=$VARIANT（支持: full | usbnet | bisect-a/b/c | test1-5）" >&2; exit 2 ;;
 esac
 

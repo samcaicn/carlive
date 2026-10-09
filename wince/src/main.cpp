@@ -110,6 +110,9 @@ static const WCHAR* EXE_TAGW = L"test4";
 #elif defined(TLTP_TEST5)
 static const char*  EXE_TAG  = "test5";
 static const WCHAR* EXE_TAGW = L"test5";
+#elif defined(TLTP_TEST6)
+static const char*  EXE_TAG  = "test6";
+static const WCHAR* EXE_TAGW = L"test6";
 #elif defined(USB_NET_ONLY)
 static const char*  EXE_TAG  = "usbnet";
 static const WCHAR* EXE_TAGW = L"usbnet";
@@ -203,6 +206,10 @@ static int g_cfgMode = NetClient::CONN_MODE_USB_NET;
 // 记在这里是为了能在启动日志里回显实际生效值：SD 卡上的 config.txt 可能被手工改过多轮，
 // 日志里没有这行就无法判断某次崩溃是否真的在"跳过枚举"的状态下发生。
 static int g_cfgNoLocalIP = 0;
+// R-debug（test6）：config.txt 解析出的显式 host IP。改为在 WinMain 读取并缓存到此全局，
+// ConnThread 不再调用 readConfig（真车实测 readConfig 从 ConnThread 调用时必闪退，
+// 而从 WinMain 调用一切正常 —— 与线程上下文/CRT 初始化强相关）。
+static std::string g_cfgIP;
 // 模式切换 toast（短暂提示，非镜像态也能看到）
 static wchar_t g_toastText[128] = L"";
 static DWORD    g_toastUntil = 0;
@@ -375,9 +382,13 @@ static DWORD WINAPI ConnThread(LPVOID) {
     // 会由 SetUnhandledExceptionFilter 在崩溃时落到 crash.log 的 stage= 字段。
     CrashSetStage("ConnThread:readConfig");
     int failRounds = 0;   // 连续连接失败轮次（用于退避，成功即清零）
-    std::string cfg = readConfig();
+    // R-debug（test6）：不再在 ConnThread 内调用 readConfig（真车实测此处必闪退），
+    // 改为使用 WinMain 已读取并缓存的全局 g_cfgIP。
+    Log("[dbg] CT: 取全局 cfgIP='%s' mode=%d", g_cfgIP.c_str(), g_cfgMode);
+    std::string cfg = g_cfgIP;
     CrashSetStage("ConnThread:SetMode");
     if (g_cfgMode != NetClient::GetMode()) NetClient::SetMode(g_cfgMode);
+    Log("[dbg] CT: SetMode 完成");
     // R16：把本机实际网段打进启动日志。网段问题排查的第一步就是确认"车机到底在哪个网段"，
     // 旧版日志里没有这条，导致只能靠猜（实测踩了 6.8 小时）。
     //
@@ -391,10 +402,12 @@ static DWORD WINAPI ConnThread(LPVOID) {
     // need==0 提前返回），因此"沙箱实测通过"并不能证明这条路径安全。
     CrashSetStage("ConnThread:LocalIPv4");
     std::string localIP = NetClient::LocalIPv4();
+    Log("[dbg] CT: LocalIPv4 完成 localIP='%s'", localIP.c_str());
     CrashSetStage("ConnThread:logStart");
     Log("ConnThread start, configIP='%s' port=%d mode=%s localIP=%s noLocalIP=%d",
         cfg.c_str(), g_cfgPort, NetClient::ModeName(), localIP.c_str(),
         g_cfgNoLocalIP ? 1 : 0);
+    Log("[dbg] CT: logStart 完成，即将 first GetCandidates");
     // R21 崩溃哨兵：真车实测日志稳定停在上一行，下一条 first GetCandidates 从未出现。
     // 在两者之间逐行打点，下次再闪退时能精确知道死在哪一步（而不是只知道"在 GetCandidates 里"）。
     Log("[stage] sentinel A: 即将进入 first GetCandidates");
@@ -408,6 +421,7 @@ static DWORD WINAPI ConnThread(LPVOID) {
         for (size_t i = 0; i < probe.size(); i++) { if (i) joined += ", "; joined += probe[i]; }
         Log("[stage] first GetCandidates -> %d 个候选 [%s]", (int)probe.size(), joined.c_str());
     }
+    Log("[dbg] CT: first GetCandidates 已返回 (%d 候选)，即将进入主循环", (int)probe.size());
     Log("[stage] sentinel B: first GetCandidates 已返回，进入主循环");
 
     while (g_running) {
@@ -884,8 +898,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
     g_net = new NetClient();
     Log("renderer+net created (WSAStartup done)");
     // 预读 config（IP + mode），使车机启动即应用所选连接模式
-    readConfig();
+    // R-debug：读取结果同时缓存到全局 g_cfgIP，ConnThread 直接复用，避免其内再调 readConfig（真车闪退点）
+    g_cfgIP = readConfig();
     if (g_cfgMode != NetClient::GetMode()) NetClient::SetMode(g_cfgMode);
+    Log("WinMain: 预读 config -> cfgIP='%s' mode=%s port=%d", g_cfgIP.c_str(), NetClient::ModeName(), g_cfgPort);
 
     // 启动 UDP 自动发现（监听手机广播的 IP）
     NetClient::StartDiscovery();

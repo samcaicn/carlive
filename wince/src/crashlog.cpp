@@ -24,6 +24,11 @@
 
 static HANDLE g_hCrash = INVALID_HANDLE_VALUE;
 static char   g_stage[64] = "";
+// R-debug：crashlog 被 WinMain / ConnThread / DiscoveryThread 并发写（g_stage 与 g_hCrash 均无锁），
+// 多线程同时写同一文件句柄+静态缓冲是数据竞争 → 会损坏堆/句柄，本身就可能引发或加剧闪退。
+// 加一把锁把整段写操作串行化（零平台依赖，WinCE 的 InitializeCriticalSection 稳定可用）。
+static CRITICAL_SECTION g_csCrash;
+static bool g_csCrashInit = false;
 
 static void safeCpy(char* dst, const char* src, unsigned cap) {
     unsigned i = 0;
@@ -68,13 +73,15 @@ static void openCrashFile(void) {
 
 void CrashSetStage(const char* stage) {
     if (!stage) return;
+    if (!g_csCrashInit) { InitializeCriticalSection(&g_csCrash); g_csCrashInit = true; }
+    EnterCriticalSection(&g_csCrash);
     // 绝大多数调用点是在循环里反复设同一个 stage。不比较的话每秒会写几十次盘，
     // 白白磨损 SD 卡闪存并抢占单核 CPU。比较后只有真正换步骤才落盘。
-    if (strcmp(g_stage, stage) == 0) return;
+    if (strcmp(g_stage, stage) == 0) { LeaveCriticalSection(&g_csCrash); return; }
     safeCpy(g_stage, stage, sizeof(g_stage));
 
     openCrashFile();
-    if (g_hCrash == INVALID_HANDLE_VALUE) return;
+    if (g_hCrash == INVALID_HANDLE_VALUE) { LeaveCriticalSection(&g_csCrash); return; }
     // 手工拼行：这里刻意不用 std::string / sprintf —— 本文件要在
     // "刚Detect 到低内存或栈已紧张" 的场景下也能工作，任何动态分配都可能二次崩溃。
     char line[128];
@@ -97,6 +104,7 @@ void CrashSetStage(const char* stage) {
     // 必须每次 flush：崩溃时进程直接消失，缓冲区里的内容会一起丢。
     // 这是本方案存在的全部意义 —— 落盘时机必须与崩溃无关。
     FlushFileBuffers(g_hCrash);
+    LeaveCriticalSection(&g_csCrash);
     (void)hex;
 }
 
