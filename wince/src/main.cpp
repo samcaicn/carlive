@@ -113,6 +113,12 @@ static const WCHAR* EXE_TAGW = L"test5";
 #elif defined(TLTP_TEST6)
 static const char*  EXE_TAG  = "test6";
 static const WCHAR* EXE_TAGW = L"test6";
+#elif defined(TLTP_TEST7)
+static const char*  EXE_TAG  = "test7";
+static const WCHAR* EXE_TAGW = L"test7";
+#elif defined(TLTP_TEST8)
+static const char*  EXE_TAG  = "test8";
+static const WCHAR* EXE_TAGW = L"test8";
 #elif defined(USB_NET_ONLY)
 static const char*  EXE_TAG  = "usbnet";
 static const WCHAR* EXE_TAGW = L"usbnet";
@@ -205,12 +211,16 @@ static std::string g_cfgIP;
 static wchar_t g_toastText[128] = L"";
 static DWORD    g_toastUntil = 0;
 static std::string readConfig() {
+    TLTP_PROBE("readCfg:enter");        // test7：函数体第一条语句前（连局部对象都还没构造）
     std::string ip;
+    TLTP_PROBE("readCfg:string");       // test7：std::string 局部对象构造完
     WCHAR path[MAX_PATH] = {0};
+    TLTP_PROBE("readCfg:gmf");          // test7：即将调 GetModuleFileName
         if (GetModuleFileName(NULL, path, MAX_PATH)) {
             WCHAR* p = wcsrchr(path, L'\\');
             if (p) wcscpy(p + 1, L"config.txt");
             else wcscpy(path, L"config.txt");   // R15：exe 在根目录（无 \）时回退到当前目录
+            TLTP_PROBE("readCfg:path");         // test7：config.txt 全路径已拼好
             TLTP_FINE_STAGE("readCfg:open");    // test4：下面 CreateFile 若死，停在这
             HANDLE hf = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
         if (hf != INVALID_HANDLE_VALUE) {
@@ -912,6 +922,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
     // 日志恰好停在上一行 "discovery started"。详见 thread.h 的完整说明。
     // R22：补 CreateThread 失败检查。此前失败会静默无日志 → 界面正常但永远不连，
     // 与"启动即闪退"症状混淆，排障方向被带偏。
+#if defined(TLTP_DELAY_CONN)
+    // test8：延迟 3 秒再创建 ConnThread——验证闪退是否与"启动初期系统/驱动仍在忙"的
+    // 时序竞争相关（R13 同机同版 13:34 三连通过、15:53 闪退，故障呈状态相关性）。
+    Log("[dbg] WinMain: test8 延迟 3s 再创建 ConnThread…");
+    Sleep(3000);
+    Log("[dbg] WinMain: 延迟结束，创建 ConnThread");
+#endif
     g_hConnThread = TltpCreateThread(ConnThread, NULL);
     if (!g_hConnThread) Log("FATAL: ConnThread CreateThread 失败 (err=%u), 仅界面运行", (unsigned)GetLastError());
     else Log("ConnThread created");

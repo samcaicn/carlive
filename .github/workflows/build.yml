@@ -101,16 +101,16 @@ jobs:
       image: ghcr.io/enlyze/windows-ce-build-environment-arm
     steps:
       - uses: actions/checkout@v4
-      - name: Build test1-6 variants (clean diagnostic battery)
+      - name: Build test1-8 variants (clean diagnostic battery)
         run: |
           cd wince
           chmod +x build_wince.sh
-          for v in 1 2 3 4 5 6; do
+          for v in 1 2 3 4 5 6 7 8; do
             VARIANT=test$v ./build_wince.sh
           done
-      - name: Verify test1-6 PE (ARM WinCE, subsystem=9)
+      - name: Verify test1-8 PE (ARM WinCE, subsystem=9)
         run: |
-          for f in test1 test2 test3 test4 test5 test6; do
+          for f in test1 test2 test3 test4 test5 test6 test7 test8; do
             ls -la wince/$f.exe
             /opt/cegcc-arm/bin/arm-mingw32ce-objdump -f wince/$f.exe \
               | grep -qi "architecture: arm" || { echo "ERROR: $f not ARM"; exit 1; }
@@ -119,8 +119,8 @@ jobs:
           subs=$(od -An -tu2 -j$((pe + 92)) -N2 wince/test1.exe | tr -d ' ')
           echo "test1 subsystem=$subs (9 = Windows CE GUI)"
           [ "$subs" = "9" ] || { echo "ERROR: subsystem is not 9 (Windows CE)"; exit 1; }
-          echo "test1-6: ARM Windows CE PE produced"
-      - name: Upload test1-6 variants
+          echo "test1-8: ARM Windows CE PE produced"
+      - name: Upload test1-8 variants
         uses: actions/upload-artifact@v4
         with:
           name: tuptup-wince-tests
@@ -131,6 +131,8 @@ jobs:
             wince/test4.exe
             wince/test5.exe
             wince/test6.exe
+            wince/test7.exe
+            wince/test8.exe
 
   source-check:
     name: Source sanity check

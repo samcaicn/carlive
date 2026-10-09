@@ -17,13 +17,15 @@ ls -la src || true
 # R33：构建「干净诊断矩阵」test1-6（见下方 case 注释）。
 # 旧的 full/usbnet/bisect-a/b/c 变体已废弃，统一由 test1-6 取代。
 # 产物名随 variants 变化，使得日志文件名（由 EXE 名派生）也各自独立。
-# R33：干净的 test1-6 诊断矩阵（覆盖全部嫌疑维度，互相正交）。
+# R33：干净的 test1-8 诊断矩阵（覆盖全部嫌疑维度，互相正交）。
 #   test1 = ADB + 复现(ConnThread 内调 readConfig) + 行级打点       → 阴性对照/复现闪退
 #   test2 = ADB + 修复(WinMain 读全局, ConnThread 复用)             → 修复候选(主)
 #   test3 = ADB + 复现 + R13 原样线程(CreateThread 0,0)            → 栈 reservation 标志嫌疑
 #   test4 = ADB + 复现 + 不 spawn 发现线程(单线程)                 → 跨线程交互嫌疑
 #   test5 = ADB + 复现 + 关闭 crashlog                             → crashlog 无锁并发写嫌疑
 #   test6 = WiFi(USB_NET_ONLY) + 修复(WinMain 读全局)              → 修复候选(另一模式)
+#   test7 = ADB + 复现 + readConfig 入口逐语句探针                 → 死点钉到具体语句
+#   test8 = ADB + 复现 + 延迟 3s 再建 ConnThread                   → 启动初期时序竞争嫌疑
 # 各 exe 日志名按 EXE 名派生，互不覆盖。
 VARIANT="${VARIANT:-test2}"
 case "$VARIANT" in
@@ -51,7 +53,15 @@ case "$VARIANT" in
     EXTRA_FLAGS="-DTLTP_TEST6 -DUSB_NET_ONLY"
     EXTRA_SRC=()
     OUT="$SCRIPT_DIR/test6.exe" ;;
-  *) echo "ERROR: 未知 VARIANT=$VARIANT（支持: test1-6）" >&2; exit 2 ;;
+  test7)   # ADB, 复现 + readConfig 入口逐语句探针(enter/string/gmf/path)
+    EXTRA_FLAGS="-DTLTP_TEST7 -DTLTP_REPRO_CONF -DTLTP_TEST_FINE_STAGE -DTLTP_PROBE_ENTRY"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
+    OUT="$SCRIPT_DIR/test7.exe" ;;
+  test8)   # ADB, 复现 + 延迟 3s 再创建 ConnThread(时序竞争嫌疑)
+    EXTRA_FLAGS="-DTLTP_TEST8 -DTLTP_REPRO_CONF -DTLTP_TEST_FINE_STAGE -DTLTP_DELAY_CONN"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
+    OUT="$SCRIPT_DIR/test8.exe" ;;
+  *) echo "ERROR: 未知 VARIANT=$VARIANT（支持: test1-8）" >&2; exit 2 ;;
 esac
 
 echo ">> building $OUT  (VARIANT=$VARIANT)"

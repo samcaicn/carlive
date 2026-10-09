@@ -52,3 +52,13 @@ void CrashSetStage(const char* stage);
 #else
 #define TLTP_FINE_STAGE(s) ((void)0)
 #endif
+
+// 【测试变体 test7】入口级逐语句探针：比 FINE_STAGE 更细一步，钉死 readConfig
+// 函数最前几行（std::string 局部构造 / GetModuleFileName / 路径拼接）的具体死点——
+// test4 已证明死点在 readCfg:open 之前，test7 负责回答"具体是哪一条语句"。
+// 仅 test7 定义 TLTP_PROBE_ENTRY，其他变体恒为空操作。
+#ifdef TLTP_PROBE_ENTRY
+#define TLTP_PROBE(s) CrashSetStage(s)
+#else
+#define TLTP_PROBE(s) ((void)0)
+#endif
