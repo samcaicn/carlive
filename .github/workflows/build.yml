@@ -200,6 +200,24 @@ jobs:
             wince/test3.exe
             wince/test4.exe
             wince/test5.exe
+      # R32 诊断+修复候选 test6：配置改在 WinMain 读并存全局，ConnThread 不再调 readConfig；
+      # 细粒度 Log 定位死点；crashlog 加锁消除多线程并发写竞争（真车闪退强嫌疑点）。
+      - name: Build test6 variant (ADB mode)
+        run: |
+          cd wince
+          chmod +x build_wince.sh
+          VARIANT=test6 ./build_wince.sh
+      - name: Verify test6 PE
+        run: |
+          ls -la wince/test6.exe
+          /opt/cegcc-arm/bin/arm-mingw32ce-objdump -f wince/test6.exe \
+            | grep -qi "architecture: arm" || { echo "ERROR: test6 not ARM"; exit 1; }
+          echo "test6 variant: ARM OK"
+      - name: Upload test6 variant
+        uses: actions/upload-artifact@v4
+        with:
+          name: tuptup-wince-test6
+          path: wince/test6.exe
 
   source-check:
     name: Source sanity check
