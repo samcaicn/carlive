@@ -11,6 +11,12 @@
 // 结论：不要写任何"崩溃时才执行"的代码，改为关键步骤主动落盘。
 #include "crashlog.h"
 
+// 二分变体 ba：crashlog.h 把 CrashSetStage 定义成了 no-op 宏，
+// 但本文件要保留真实函数定义（链接层仍需要它），no-op 只作用于各调用点。
+#ifdef CrashSetStage
+#undef CrashSetStage
+#endif
+
 #ifdef _WIN32
 
 #include <windows.h>

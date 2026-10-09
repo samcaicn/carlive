@@ -144,6 +144,34 @@ jobs:
         with:
           name: tuptup-wince-usbnet-exe
           path: wince/tuptup-usbnet.exe
+      # R30 二分定位：一轮出 3 个变体（每个只改一个嫌疑变量），SD 卡逐个点，
+      # 谁活谁死立即收窄真车闪退根因：
+      #   ba = CrashSetStage 空操作   → 验 crashlog 模块（无锁静态缓冲被多线程并发写）
+      #   bb = R13 原样线程创建       → 验 R23 STACK_SIZE_PARAM_IS_A_RESERVATION 标志
+      #   bc = 显式 256KB 栈不带标志  → bb 存活时的正式修复候选
+      - name: Build bisect variants (a/b/c)
+        run: |
+          cd wince
+          chmod +x build_wince.sh
+          VARIANT=bisect-a ./build_wince.sh
+          VARIANT=bisect-b ./build_wince.sh
+          VARIANT=bisect-c ./build_wince.sh
+      - name: Verify bisect variants PE
+        run: |
+          for f in tuptup-ba tuptup-bb tuptup-bc; do
+            ls -la wince/$f.exe
+            /opt/cegcc-arm/bin/arm-mingw32ce-objdump -f wince/$f.exe \
+              | grep -qi "architecture: arm" || { echo "ERROR: $f not ARM"; exit 1; }
+          done
+          echo "bisect variants: ARM OK"
+      - name: Upload bisect variants
+        uses: actions/upload-artifact@v4
+        with:
+          name: tuptup-wince-bisect
+          path: |
+            wince/tuptup-ba.exe
+            wince/tuptup-bb.exe
+            wince/tuptup-bc.exe
 
   source-check:
     name: Source sanity check

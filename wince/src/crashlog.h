@@ -1,4 +1,13 @@
 #pragma once
+
+// 【二分变体 ba】CrashSetStage 编译期空操作。用于验证 crashlog 模块本身
+// （无锁静态缓冲 + DiscoveryThread/ConnThread 并发写）是否为真车闪退元凶。
+// CrashLogInit 保留原样（它的竞争窗口只在 WinMain 单线程阶段，无害）。
+// crashlog.cpp 里已 #undef 本宏以保留真实函数定义，no-op 只作用于调用点。
+#ifdef TLTP_BISECT_NO_CRASHLOG
+#define CrashSetStage(stage) ((void)0)
+#endif
+
 // crashlog.h - 崩溃定位（stage 主动落盘）R24 新增 / R25 修正实现方式
 //
 // ## 为什么需要它

@@ -30,7 +30,26 @@ case "$VARIANT" in
     EXTRA_SRC=()
     OUT="$SCRIPT_DIR/tuptup-usbnet.exe"
     ;;
-  *) echo "ERROR: 未知 VARIANT=$VARIANT（支持: full | usbnet）" >&2; exit 2 ;;
+  # R30 二分定位：一轮 CI 出 3 个变体，每个只改一个嫌疑变量。
+  #   bisect-a (ba) = CrashSetStage 空操作      → 验 crashlog 模块（无锁并发写）
+  #   bisect-b (bb) = R13 原样线程创建          → 验 R23 栈 reservation 标志
+  #   bisect-c (bc) = 显式 256KB 栈不带标志     → bb 存活时的修复候选
+  bisect-a)
+    EXTRA_FLAGS="-DTLTP_BISECT_NO_CRASHLOG"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
+    OUT="$SCRIPT_DIR/tuptup-ba.exe"
+    ;;
+  bisect-b)
+    EXTRA_FLAGS="-DTLTP_BISECT_PLAIN_THREAD"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
+    OUT="$SCRIPT_DIR/tuptup-bb.exe"
+    ;;
+  bisect-c)
+    EXTRA_FLAGS="-DTLTP_BISECT_BIGSTACK"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
+    OUT="$SCRIPT_DIR/tuptup-bc.exe"
+    ;;
+  *) echo "ERROR: 未知 VARIANT=$VARIANT（支持: full | usbnet | bisect-a | bisect-b | bisect-c）" >&2; exit 2 ;;
 esac
 
 echo ">> building $OUT  (VARIANT=$VARIANT)"

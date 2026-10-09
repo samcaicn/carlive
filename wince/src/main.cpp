@@ -95,9 +95,18 @@ static void BuildSingleInstanceName(WCHAR* out, DWORD cap) {
 // R28：变体标记。SD 卡上三个 exe 界面长得一模一样，车机上跑起来根本分不清
 // 当前到底在跑哪个 —— 一旦混着测，回来的日志对不上exe，实验等于白做。
 // 把标记打进窗口标题与状态首屏，人眼一眼可辨。
-#ifdef USB_NET_ONLY
+#if defined(USB_NET_ONLY)
 static const char*  EXE_TAG  = "usbnet";
 static const WCHAR* EXE_TAGW = L"usbnet";
+#elif defined(TLTP_BISECT_NO_CRASHLOG)
+static const char*  EXE_TAG  = "bisect-a";
+static const WCHAR* EXE_TAGW = L"bisect-a";
+#elif defined(TLTP_BISECT_PLAIN_THREAD)
+static const char*  EXE_TAG  = "bisect-b";
+static const WCHAR* EXE_TAGW = L"bisect-b";
+#elif defined(TLTP_BISECT_BIGSTACK)
+static const char*  EXE_TAG  = "bisect-c";
+static const WCHAR* EXE_TAGW = L"bisect-c";
 #else
 static const char*  EXE_TAG  = "full";
 static const WCHAR* EXE_TAGW = L"full";

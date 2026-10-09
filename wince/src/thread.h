@@ -36,11 +36,27 @@
 #define TLTP_STACK_RESERVE (128 * 1024)
 
 #ifdef _WIN32
+#if defined(TLTP_BISECT_PLAIN_THREAD)
+// 【二分变体 bb】R13 原样线程创建：dwStackSize=0、flags=0。
+// R13 实测 3/3 不崩，本变体若也过了 ConnThread:start → R23 的
+// STACK_SIZE_PARAM_IS_A_RESERVATION 标志即元凶坐实。
+inline HANDLE TltpCreateThread(LPTHREAD_START_ROUTINE fn, LPVOID param) {
+    return ::CreateThread(NULL, 0, fn, param, 0, NULL);
+}
+#elif defined(TLTP_BISECT_BIGSTACK)
+// 【二分变体 bc】显式大栈但【不带】reservation 标志。
+// bb 存活时的正式修复候选：CE 按其文档尊重 dwStackSize，直接给 256KB，
+// 既避开可疑标志，又给足 std::string/vector 的栈空间。
+inline HANDLE TltpCreateThread(LPTHREAD_START_ROUTINE fn, LPVOID param) {
+    return ::CreateThread(NULL, 256 * 1024, fn, param, 0, NULL);
+}
+#else
 // 统一入口：屏蔽 WinCE 的栈大小坑，等价于普通 CreateThread。
 inline HANDLE TltpCreateThread(LPTHREAD_START_ROUTINE fn, LPVOID param) {
     return ::CreateThread(NULL, TLTP_STACK_RESERVE, fn, param,
                           STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
 }
+#endif
 #else
 // 宿主（POSIX）回归测试用不到本封装 —— adb.cpp 在 POSIX 分支走 pthread_create，
 // 且 net.cpp/main.cpp 不参与主机编译。这里保留一个可编译的等价实现，
