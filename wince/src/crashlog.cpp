@@ -80,7 +80,8 @@ void CrashSetStage(const char* stage) {
     while (*s && n < (int)sizeof(line) - 20) line[n++] = *s++;
     line[n++] = ' '; line[n++] = 't';
     // 毫秒时间戳：与 tuptup.log 的 t+xxx 对齐，方便两次日志交叉比对
-    const char* d = "0123456789";
+    const char* d = "0123456789ABCDEF";   // R29：时间戳用 16 进制；原 "0123456789" 仅 10 字符，
+                                           // 而 &0xF 会读 0-15，越界读到的字节混进日志（显示为空格）
     unsigned ms = GetTickCount();
     for (int i = 0; i < 8; i++) { line[n++] = d[(ms >> ((7 - i) * 4)) & 0xF]; }
     line[n++] = '\r'; line[n++] = '\n';

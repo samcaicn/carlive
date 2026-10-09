@@ -32,10 +32,6 @@ DWORD NetClient::LastRecvTick() { return (DWORD)g_lastRecvTick; }
 void NetClient::ResetRecvTick() { g_lastRecvTick = GetTickCount(); }
 long NetClient::ConnEpoch() { return g_epoch; }
 
-// R22：AdapterBufLen 观测到的异常 buflen（>64KB）。仅置标志，由调用点在安全位置上报，
-//绝不在网卡枚举内部调Log()（详见 AdapterBufLen 注释）。
-static volatile LONG g_adaptBufTooBig = 0;
-
 // 连接模式：默认直连（USB 网络共享）。可在 config.txt 设 mode=usb_adb 切到 ADB 隧道。
 static int s_mode = NetClient::CONN_MODE_USB_NET;
 void NetClient::SetMode(int m) {
@@ -365,53 +361,54 @@ static bool parseIPv4(const char* s, unsigned out[4]) {
 static bool g_skipLocalIP = false;
 void NetClient::SetSkipLocalIP(bool on) { g_skipLocalIP = on; }
 
-static ULONG AdapterBufLen(ULONG* out) {
-    if (g_skipLocalIP) {
-        // 返回非 ERROR_BUFFER_OVERFLOW → 调用点的 `!= ERROR_BUFFER_OVERFLOW` 判据成立，
-        // 走"无网卡"分支直接返回，第二次 GetAdaptersInfo 与链表遍历都不会执行。
-        CrashSetStage("AdapterBufLen:skipped(noLocalIP=1)");
-        return ERROR_NO_DATA;
-    }
-    // R26：这行之前没有任何打点 —— 它是网卡枚举路径上第一条真正执行的 Win32 调用。
-    // 若崩溃发生在 GetAdaptersInfo 首次调用内部，crash.log 会停在上一个调用点的stage
-    // 上（看起来像"崩在 readConfig"），把排查范围误导回完全无关的函数。
-    CrashSetStage("AdapterBufLen:GetAdaptersInfo1");
+// R29：ADB 模式下【完全不需要】GetAdaptersInfo / 网卡枚举——
+//   手机经 USB 网络共享后，adbd 在 5555 监听，车机用 ADB 协议鉴权后 OPEN "tcp:8686"
+//   即打通 TUPT；候选 IP 直接来自 UDP 8687 信标（recvfrom 拿源 IP，零网卡依赖）。
+//   因此 ADB 模式下所有走 GetAdaptersInfo 的路径一律短路返回，既消除
+//   "并发 GetAdaptersInfo 踩堆导致 ConnThread::readConfig 崩溃"，也让 ADB 成为最稳的连接
+//   方式（亿连等车机投屏正是走这条路，权限最高、无需猜网段）。
+//   usb_net 模式仍维持原枚举逻辑；noLocalIP 开关效果与 ADB 等价（都无法判定子网，
+//   故信标/配置 IP 全部接受）。
+static bool adbMode() { return s_mode == NetClient::CONN_MODE_USB_ADB; }
+
+// R29：安全封装 GetAdaptersInfo，彻底消除“并发枚举踩堆”崩溃。
+// 旧实现的崩溃链：StartDiscovery（main.cpp:863）在 ConnThread 之前就 spawn 了
+// SubnetScanThread，后者在车机这个 CE ROM 上调 GetAdaptersInfo 时，首次调用报告的
+// buflen 偏小，按该值分配缓冲后再调一次 → 第二次写入越界踩坏进程堆；随后 ConnThread
+// 在 readConfig() 里做 content += buf 的堆分配时踩到坏块 → 进程消失，
+// crash.log 恰好停在 ConnThread:readConfig（见 R13~R28 的全部排查）。
+// 修复：① 分配 2x 缓冲 + 最多 4 次重试，保证缓冲始终足够大，杜绝越界；
+//       ② ADB / noLocalIP 模式下本函数直接返回 false，上层一律走“无网卡”分支，
+//          不再触碰 GetAdaptersInfo（ADB 模式候选全来自 UDP 8687 信标，根本不需要它）。
+static bool GetAdaptersSafe(std::vector<BYTE>& buf) {
+    if (adbMode() || g_skipLocalIP) return false;
     ULONG need = 0;
-    *out = 0;
-    GetAdaptersInfo(NULL, &need);   // 返回值刻意丢弃，理由见下
-    if (need == 0) return ERROR_BUFFER_OVERFLOW;   // 确实无网卡/驱动不可用
-    if (need > 64 * 1024) {
-        // R22 起：这里【绝不能调Log()】。网卡枚举路径上做文件 IO 会放大栈压力。
-        // 改为置标志，由调用点在安全位置统一上报。
-        g_adaptBufTooBig = need;
-        return ERROR_BUFFER_OVERFLOW;
+    if (GetAdaptersInfo(NULL, &need) != ERROR_BUFFER_OVERFLOW) {
+        // 首次调用非 OVERFLOW：要么真无网卡(need 仍可能被置 0)，要么 ROM 异常。
+        // need==0 视为无网卡；否则按报告值继续（极少见的 ROM 行为）。
+        if (need == 0) return false;
     }
-    // R26 关键修正：原实现 `return rc`（GetAdaptersInfo 的真实返回值），
-    // 而四个调用点全部按 `rc != ERROR_BUFFER_OVERFLOW` 判成败。
-    // 标准语义下首次调用确实返回 ERROR_BUFFER_OVERFLOW，但对 WinCE 部分 ROM
-    // 它会返回 NO_ERROR —— 此时长度已正确填好、函数"成功"返回，
-    // 调用点却因rc 不匹配直接 return，导致**第二次 GetAdaptersInfo 与链表遍历
-    // 永远不执行**。症状是"网卡明明拿到 IP，localIP 却恒为空、候选恒为 0"。
-    // 改为：拿到合理长度即视为就绪，不再把真实 rc 当成功判据。
-    *out = need;
-    return ERROR_BUFFER_OVERFLOW;
+    if (need == 0) need = 16 * 1024;   // 兜底初值，针对“首次调用就把 need 置 0”的退化 ROM
+    for (int tries = 0; tries < 4; tries++) {
+        ULONG cap = need * 2;          // 预留 2 倍，吸收 ROM 报告的偏差（核心修复点）
+        if (cap > 256 * 1024) cap = 256 * 1024;
+        try { buf.resize(cap); } catch (...) { return false; }
+        if (buf.empty()) return false;
+        memset(&buf[0], 0, cap);
+        ULONG r = GetAdaptersInfo((PIP_ADAPTER_INFO)&buf[0], &need);
+        if (r == NO_ERROR) return true;
+        if (r != ERROR_BUFFER_OVERFLOW) return false;   // 其它错误：放弃枚举
+        // r == OVERFLOW：need 已被更新为真实需求，下一轮以 2x 重试
+    }
+    return false;
 }
 
 bool NetClient::IsSameSubnet(const char* ip) {
     unsigned t[4];
     if (!parseIPv4(ip, t)) return false;
-    CrashSetStage("IsSameSubnet:AdapterBufLen");
-    ULONG buflen = 0;
-    // R26：AdapterBufLen 现已统一为"返回 ERROR_BUFFER_OVERFLOW 即就绪"，
-    // 故只需判长度是否为 0。
-    if (AdapterBufLen(&buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0) return false;
     std::vector<BYTE> buf;
-    try { buf.resize(buflen); } catch (...) { return false; }
-    if (buf.empty()) return false;
-    memset(&buf[0], 0, buflen);
-    CrashSetStage("IsSameSubnet:GetAdaptersInfo2");
+    if (!GetAdaptersSafe(buf)) return false;   // R29：含 ADB/noLocalIP 短路 + 2x 安全缓冲
     PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)&buf[0];
-    if (GetAdaptersInfo(pAdapters, &buflen) != NO_ERROR) return false;
     CrashSetStage("IsSameSubnet:walkChain");
     for (PIP_ADAPTER_INFO p = pAdapters; p; p = p->Next) {
         for (PIP_ADDR_STRING addr = &p->IpAddressList; addr; addr = addr->Next) {
@@ -426,17 +423,9 @@ bool NetClient::IsSameSubnet(const char* ip) {
 
 // 本机当前主地址（判定网段变化用）：取第一个私有网段 IPv4，取不到返回空。
 std::string NetClient::LocalIPv4() {
-    CrashSetStage("LocalIPv4:AdapterBufLen");
-    ULONG buflen = 0;
-    if (AdapterBufLen(&buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0) return "";
-    CrashSetStage("LocalIPv4:vectorResize");
     std::vector<BYTE> buf;
-    try { buf.resize(buflen); } catch (...) { return ""; }
-    if (buf.empty()) return "";
-    memset(&buf[0], 0, buflen);
-    CrashSetStage("LocalIPv4:GetAdaptersInfo2");
+    if (!GetAdaptersSafe(buf)) return "";   // R29：含 ADB/noLocalIP 短路 + 2x 安全缓冲
     PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)&buf[0];
-    if (GetAdaptersInfo(pAdapters, &buflen) != NO_ERROR) return "";
     CrashSetStage("LocalIPv4:walkChain");
     for (PIP_ADAPTER_INFO p = pAdapters; p; p = p->Next) {
         for (PIP_ADDR_STRING addr = &p->IpAddressList; addr; addr = addr->Next) {
@@ -455,17 +444,9 @@ std::string NetClient::LocalIPv4() {
 // 关键修正：网关/.1 必须【先探测 8686 通了才加为候选】——否则车机自身的 WiFi 路由器网关
 // （如 192.168.43.1）会被当成手机反复连、每轮白等 1.5s。路由器没有 8686，探测必失败，自然被排除。
 static void AddInterfaceGateways() {
-    CrashSetStage("AddInterfaceGateways:AdapterBufLen");
-    ULONG buflen = 0;
-    if (AdapterBufLen(&buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0)
-        return;
     std::vector<BYTE> buf;
-    try { buf.resize(buflen); } catch (...) { return; }
-    if (buf.empty()) return;
-    memset(&buf[0], 0, buflen);
-    CrashSetStage("AddInterfaceGateways:GetAdaptersInfo2");
+    if (!GetAdaptersSafe(buf)) return;   // R29：含 ADB/noLocalIP 短路 + 2x 安全缓冲
     PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)&buf[0];
-    if (GetAdaptersInfo(pAdapters, &buflen) != NO_ERROR) return;
     CrashSetStage("AddInterfaceGateways:walkChain");
     for (PIP_ADAPTER_INFO p = pAdapters; p; p = p->Next) {
         // 优先使用网卡自身上报的真实网关（USB 共享下即手机地址）；探测通才加
@@ -549,18 +530,10 @@ static DWORD WINAPI SubnetScanThread(LPVOID) {
     while (g_discoveryOn) {
         if (g_linkUp) { Sleep(1000); continue; }   // 已连上：暂停扫描，不浪费资源/不打扰手机
 
-        CrashSetStage("SubnetScan:AdapterBufLen");
-        ULONG buflen = 0;
-        if (AdapterBufLen(&buflen) != ERROR_BUFFER_OVERFLOW || buflen == 0) {
-            Sleep(2000); continue;
-        }
+        CrashSetStage("SubnetScan:GetAdaptersSafe");
         std::vector<BYTE> buf;
-        try { buf.resize(buflen); } catch (...) { Sleep(2000); continue; }
-        if (buf.empty()) { Sleep(2000); continue; }
-        memset(&buf[0], 0, buflen);
-        CrashSetStage("SubnetScan:GetAdaptersInfo2");
+        if (!GetAdaptersSafe(buf)) { Sleep(2000); continue; }   // R29：2x 安全缓冲，杜绝越界踩堆
         PIP_ADAPTER_INFO pAdapters = (PIP_ADAPTER_INFO)&buf[0];
-        if (GetAdaptersInfo(pAdapters, &buflen) != NO_ERROR) { Sleep(2000); continue; }
         CrashSetStage("SubnetScan:walkChain");
 
         // R19 首次连接健壮性：WinCE 开机后 WiFi 网卡往往**几十秒后才拿到 IP**，
@@ -690,7 +663,7 @@ static DWORD WINAPI DiscoveryThread(LPVOID) {
                         unsigned ba[4];
                         if (!parseIPv4(ip, ba)) {
                             // 非法 IPv4，直接丢弃
-                        } else if (!NetClient::IsSameSubnet(ip)) {
+                        } else if (!adbMode() && !NetClient::IsSameSubnet(ip)) {
                             static long long lastBadLog = 0;
                             long long now = GetTickCount();
                             if (now - lastBadLog > 60000) {
@@ -853,7 +826,11 @@ void NetClient::StartDiscovery() {
     // 等对象并调用 GetAdaptersInfo/probePort/sscanf，64KB 会溢出。
     // 症状同样是"进程瞬间消失、日志停在StartDiscovery 之前"。
     g_hDiscThread = TltpCreateThread(DiscoveryThread, NULL);
-    g_hScanThread = TltpCreateThread(SubnetScanThread, NULL);
+    // R29：ADB 模式下彻底不跑子网扫描线程 —— 它内部唯一的网卡枚举用途是为
+    // usb_net 推导候选，而 ADB 模式候选全来自 UDP 8687 信标（无需 GetAdaptersInfo，
+    // 也避免并发踩堆导致 ConnThread 崩溃）。usb_net 模式仍照常扫描。
+    if (!adbMode())
+        g_hScanThread = TltpCreateThread(SubnetScanThread, NULL);
 }
 
 void NetClient::StopDiscovery() {
@@ -908,7 +885,8 @@ void NetClient::GetCandidates(const std::string& configIP, std::vector<std::stri
     const int CFG_IP_FAIL_MAX = 3;
     if (!configIP.empty()) {
         if (configIP != g_cfgIPUsed) { g_cfgIPUsed = configIP; g_cfgFailStreak = 0; }
-        if (!IsSameSubnet(configIP.c_str())) {
+        bool cfgInSubnet = adbMode() ? true : NetClient::IsSameSubnet(configIP.c_str());
+        if (!cfgInSubnet) {
             static DWORD s_lastWarn = 0;
             if (GetTickCount() - s_lastWarn > 60000) {   // 同一原因每分钟只提醒一次，避免刷屏
                 s_lastWarn = GetTickCount();
