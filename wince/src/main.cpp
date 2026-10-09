@@ -420,8 +420,8 @@ static DWORD WINAPI ConnThread(LPVOID) {
         std::string joined;
         for (size_t i = 0; i < probe.size(); i++) { if (i) joined += ", "; joined += probe[i]; }
         Log("[stage] first GetCandidates -> %d 个候选 [%s]", (int)probe.size(), joined.c_str());
+        Log("[dbg] CT: first GetCandidates 已返回 (%d 候选)，即将进入主循环", (int)probe.size());
     }
-    Log("[dbg] CT: first GetCandidates 已返回 (%d 候选)，即将进入主循环", (int)probe.size());
     Log("[stage] sentinel B: first GetCandidates 已返回，进入主循环");
 
     while (g_running) {
