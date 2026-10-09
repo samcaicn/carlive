@@ -101,38 +101,44 @@ jobs:
       image: ghcr.io/enlyze/windows-ce-build-environment-arm
     steps:
       - uses: actions/checkout@v4
-      - name: Build test1-8 variants (clean diagnostic battery)
+      - name: Build test9-15 variants (discovery-thread Winsock bisect)
         run: |
           cd wince
           chmod +x build_wince.sh
-          for v in 1 2 3 4 5 6 7 8; do
+          for v in 9 10 11 12 13 14 15; do
             VARIANT=test$v ./build_wince.sh
           done
-      - name: Verify test1-8 PE (ARM WinCE, subsystem=9)
+      - name: Build test16 (R13 legacy baseline rebuild @be6ff77)
         run: |
-          for f in test1 test2 test3 test4 test5 test6 test7 test8; do
+          chmod +x wince-legacy/r13/build_wince.sh
+          cd wince-legacy/r13
+          ./build_wince.sh
+          cp GLOAI.exe ../../wince/test16.exe
+      - name: Verify test9-16 PE (ARM WinCE, subsystem=9)
+        run: |
+          for f in test9 test10 test11 test12 test13 test14 test15 test16; do
             ls -la wince/$f.exe
             /opt/cegcc-arm/bin/arm-mingw32ce-objdump -f wince/$f.exe \
               | grep -qi "architecture: arm" || { echo "ERROR: $f not ARM"; exit 1; }
           done
-          pe=$(od -An -tu4 -j60 -N4 wince/test1.exe | tr -d ' ')
-          subs=$(od -An -tu2 -j$((pe + 92)) -N2 wince/test1.exe | tr -d ' ')
-          echo "test1 subsystem=$subs (9 = Windows CE GUI)"
+          pe=$(od -An -tu4 -j60 -N4 wince/test9.exe | tr -d ' ')
+          subs=$(od -An -tu2 -j$((pe + 92)) -N2 wince/test9.exe | tr -d ' ')
+          echo "test9 subsystem=$subs (9 = Windows CE GUI)"
           [ "$subs" = "9" ] || { echo "ERROR: subsystem is not 9 (Windows CE)"; exit 1; }
-          echo "test1-8: ARM Windows CE PE produced"
-      - name: Upload test1-8 variants
+          echo "test9-16: ARM Windows CE PE produced"
+      - name: Upload test9-16 variants
         uses: actions/upload-artifact@v4
         with:
           name: tuptup-wince-tests
           path: |
-            wince/test1.exe
-            wince/test2.exe
-            wince/test3.exe
-            wince/test4.exe
-            wince/test5.exe
-            wince/test6.exe
-            wince/test7.exe
-            wince/test8.exe
+            wince/test9.exe
+            wince/test10.exe
+            wince/test11.exe
+            wince/test12.exe
+            wince/test13.exe
+            wince/test14.exe
+            wince/test15.exe
+            wince/test16.exe
 
   source-check:
     name: Source sanity check

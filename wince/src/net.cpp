@@ -292,6 +292,9 @@ static CRITICAL_SECTION g_csCand;
 static std::vector<std::string> g_priIPs;      // 接口网关推导 + 扫描确认（均经 8686 探测命中）
 static std::vector<std::string> g_beaconIPs;   // UDP 信标带来的手机真实 IP（**多台**，按到达顺序）
 static std::string g_beaconIP;                 // 最近一次信标 IP（仅用于日志比对，不参与候选唯一性）
+// 【test13/14】主线程预创建的信标 socket（TLTP_DISC_SOCK_MAIN / TLTP_DISC_BIND_MAIN）——
+// 隔离"非主线程做网络栈调用"是否为本 CE ROM 的崩溃条件。
+static SOCKET g_discSock = INVALID_SOCKET;
 static volatile bool g_discoveryOn = false;
 static volatile bool g_linkUp      = false;    // 链路已连通（握手成功）→ 暂停扫描
 
@@ -602,14 +605,49 @@ static DWORD WINAPI SubnetScanThread(LPVOID) {
 static DWORD WINAPI DiscoveryThread(LPVOID) {
     // R23 存活哨兵：本线程第一条语句。见 thread.h（WinCE 默认栈仅 64KB）。
     Log("[stage] DiscoveryThread entered");
+#if defined(TLTP_DISC_NO_SOCKET)
+    // 【test10】信标线程纯空转——跳过 socket/setsockopt/bind/select 全部网络栈调用。
+    // 真车日志钉死的死亡窗口 = entered 之后、bind 结果日志之前（这段只有 Winsock 调用）。
+    Log("[dbg] disc: test10 空转模式（不创建任何 socket）");
+    while (g_discoveryOn) Sleep(500);
+    return 0;
+#endif
+#if defined(TLTP_DISC_WSA_SELF)
+    // 【test15】线程内自行 WSAStartup——验证此 CE ROM 是否要求每线程自己初始化 Winsock。
+    WSADATA wsa;
+    int wsaRet = WSAStartup(MAKEWORD(2, 2), &wsa);
+    Log("[dbg] disc: test15 线程内 WSAStartup -> %d", wsaRet);
+#endif
+#if defined(TLTP_DISC_SOCK_MAIN)
+    // 【test13/14】socket 已在主线程（StartDiscovery）预创建，本线程直接使用——
+    // 隔离"非主线程调用 socket()"这一步。
+    SOCKET s = g_discSock;
+    if (s == INVALID_SOCKET) { Log("disc: 主线程预建 socket 无效，信标不可用"); return 0; }
+    Log("[dbg] disc: 使用主线程预建 socket");
+#else
     SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s == INVALID_SOCKET) { Log("disc: 创建 UDP socket 失败 (WSA=%d)，信标发现不可用", WSAGetLastError()); return 0; }
+    Log("[dbg] disc: 线程内 socket() 成功");
+#endif
     BOOL reuse = 1;
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
+#if defined(TLTP_DISC_SOCK_ONLY)
+    // 【test11】socket()+setsockopt 之后立即关闭退出——最小化隔离"线程内创建 socket"。
+    Log("[dbg] disc: test11 socket() 成功，立即 closesocket 退出线程");
+    closesocket(s);
+    return 0;
+#endif
     sockaddr_in sa = {0};
     sa.sin_family = AF_INET;
     sa.sin_port = htons((u_short)DISCOVERY_PORT);
     sa.sin_addr.s_addr = INADDR_ANY;
+#if defined(TLTP_DISC_NO_BIND)
+    // 【test12】跳过 bind：select 挂在未绑定 socket 上（永不可读，仅探活线程与 socket 生命周期）。
+    Log("[dbg] disc: test12 跳过 bind，直接进 select 空转");
+#elif defined(TLTP_DISC_BIND_MAIN)
+    // 【test14】bind 也由主线程完成，本线程直接进 select/recvfrom。
+    Log("[dbg] disc: test14 使用主线程预 bind 的 socket，直接进 select 循环");
+#else
     // R19 首次连接健壮性：旧版 bind 失败就 `return 0` 静默退出 —— 无日志、无重试。
     // 车机环境 bind 8687 失败很常见（端口被上次残留进程占用 / Winsock 尚未就绪 /
     // 前一次崩溃没释放），一旦发生**信标发现永久失效**，只剩扫描兜底，
@@ -633,6 +671,7 @@ static DWORD WINAPI DiscoveryThread(LPVOID) {
     }
     if (!g_discoveryOn) { closesocket(s); return 0; }
     Log("disc: 信标监听就绪 UDP %d（0.0.0.0）", DISCOVERY_PORT);
+#endif
     // 探测手段 2（接口网关推导）立即做一次，之后持续监听信标(手段1)
     AddInterfaceGateways();
 
@@ -821,23 +860,45 @@ void NetClient::StartDiscovery() {
     if (g_discoveryOn) return;
     LoadKnownPhones();   // 启动时读取“记住的手机”，供本轮回合优先直连
     g_discoveryOn = true;
+#if defined(TLTP_DISC_SOCK_MAIN)
+    // 【test13/14】主线程预创建 socket（TLTP_DISC_BIND_MAIN 时连 bind 也在主线程做）——
+    // 真车死亡窗口钉在 DiscoveryThread 的 socket()/bind() 一带（entered 之后、
+    // bind 结果日志之前），test8 证明与 ConnThread 无关。
+    g_discSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    Log("[dbg] disc: 主线程 socket() -> %s", g_discSock == INVALID_SOCKET ? "FAIL" : "ok");
+#if defined(TLTP_DISC_BIND_MAIN)
+    if (g_discSock != INVALID_SOCKET) {
+        BOOL reuse = 1;
+        setsockopt(g_discSock, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
+        sockaddr_in sa = {0};
+        sa.sin_family = AF_INET;
+        sa.sin_port = htons((u_short)DISCOVERY_PORT);
+        sa.sin_addr.s_addr = INADDR_ANY;
+        if (bind(g_discSock, (SOCKADDR*)&sa, sizeof(sa)) == SOCKET_ERROR)
+            Log("[dbg] disc: 主线程 bind 失败 (WSA=%d)", WSAGetLastError());
+        else
+            Log("[dbg] disc: 主线程 bind 成功 UDP %d", DISCOVERY_PORT);
+    }
+#endif
+#endif
+#ifndef TLTP_DISC_NO_THREAD
     // R23：走 TltpCreateThread 显式保留 128KB 栈。WinCE 忽略 CreateThread 的
     // dwStackSize（默认只有 64KB），而这两个探测线程栈上要放 std::vector<BYTE> buf
     // 等对象并调用 GetAdaptersInfo/probePort/sscanf，64KB 会溢出。
     // 症状同样是"进程瞬间消失、日志停在StartDiscovery 之前"。
     g_hDiscThread = TltpCreateThread(DiscoveryThread, NULL);
+#else
+    // 【test9】真·无发现：连信标线程都不 spawn。旧 test4/5 的宏只挡了扫描线程，
+    // 信标线程从未被关掉（日志可见 DiscoveryThread entered 照常出现）——结论作废。
+    // 若 test9 活 → 元凶在 DiscoveryThread（大概率是其 Winsock 调用）；
+    // 若 test9 也死 → 元凶在主线程侧（窗口/渲染/NetClient 构造/ConnThread）。
+    Log("[dbg] disc: test9 信标线程不启动（真·无发现）");
+#endif
     // R29：ADB 模式下彻底不跑子网扫描线程 —— 它内部唯一的网卡枚举用途是为
     // usb_net 推导候选，而 ADB 模式候选全来自 UDP 8687 信标（无需 GetAdaptersInfo，
     // 也避免并发踩堆导致 ConnThread 崩溃）。usb_net 模式仍照常扫描。
-#ifndef TLTP_TEST_NO_DISCOVERY
     if (!adbMode())
         g_hScanThread = TltpCreateThread(SubnetScanThread, NULL);
-#else
-    // 【测试变体 test5】连信标线程也不 spawn —— ConnThread 成为唯一后台线程。
-    // 若 test5 不闪退而其他变体闪退 → 元凶是跨线程交互（crashlog 并发写 /
-    // 堆竞争），而非任何单线程内的代码。代价：无法发现手机，仅用于启动定位。
-    Log("test5: discovery disabled (single-thread probe)");
-#endif
 }
 
 void NetClient::StopDiscovery() {
