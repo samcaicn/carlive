@@ -856,9 +856,16 @@ void NetClient::GetKnownIPs(std::vector<std::string>& out) {
 }
 
 void NetClient::StartDiscovery() {
+    // 【诊断埋点 R34】test9（无信标线程）稳定死在主线程 StartDiscovery 之前/之中，
+    // 而 readConfig 之后所有 Log 均成功 → 死点被钉在 StartDiscovery 内部。
+    // 这里用细粒度 stage 把 InitializeCriticalSection(&g_csCand) 与 LoadKnownPhones 两个
+    // 最早的可能踩堆/踩临界区操作分开，下一次上车复测即可确定死在哪一步。
+    CrashSetStage("Disc:enter");
     InitializeCriticalSection(&g_csCand);
+    CrashSetStage("Disc:csCand");
     if (g_discoveryOn) return;
     LoadKnownPhones();   // 启动时读取“记住的手机”，供本轮回合优先直连
+    CrashSetStage("Disc:loadKnown");
     g_discoveryOn = true;
 #if defined(TLTP_DISC_SOCK_MAIN)
     // 【test13/14】主线程预创建 socket（TLTP_DISC_BIND_MAIN 时连 bind 也在主线程做）——

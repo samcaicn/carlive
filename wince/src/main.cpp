@@ -140,6 +140,15 @@ static const WCHAR* EXE_TAGW = L"test14";
 #elif defined(TLTP_TEST15)
 static const char*  EXE_TAG  = "test15";
 static const WCHAR* EXE_TAGW = L"test15";
+#elif defined(TLTP_TEST17)
+static const char*  EXE_TAG  = "test17";
+static const WCHAR* EXE_TAGW = L"test17";
+#elif defined(TLTP_TEST18)
+static const char*  EXE_TAG  = "test18";
+static const WCHAR* EXE_TAGW = L"test18";
+#elif defined(TLTP_TEST19)
+static const char*  EXE_TAG  = "test19";
+static const WCHAR* EXE_TAGW = L"test19";
 #elif defined(USB_NET_ONLY)
 static const char*  EXE_TAG  = "usbnet";
 static const WCHAR* EXE_TAGW = L"usbnet";
@@ -419,6 +428,7 @@ static DWORD WINAPI ConnThread(LPVOID) {
     CrashSetStage("ConnThread:SetMode");
     if (g_cfgMode != NetClient::GetMode()) NetClient::SetMode(g_cfgMode);
     Log("[dbg] CT: SetMode 完成");
+    CrashSetStage("ConnThread:afterSetMode");
     // R16：把本机实际网段打进启动日志。网段问题排查的第一步就是确认"车机到底在哪个网段"，
     // 旧版日志里没有这条，导致只能靠猜（实测踩了 6.8 小时）。
     //
@@ -433,6 +443,7 @@ static DWORD WINAPI ConnThread(LPVOID) {
     CrashSetStage("ConnThread:LocalIPv4");
     std::string localIP = NetClient::LocalIPv4();
     Log("[dbg] CT: LocalIPv4 完成 localIP='%s'", localIP.c_str());
+    CrashSetStage("ConnThread:afterLocalIP");
     CrashSetStage("ConnThread:logStart");
     Log("ConnThread start, configIP='%s' port=%d mode=%s localIP=%s noLocalIP=%d",
         cfg.c_str(), g_cfgPort, NetClient::ModeName(), localIP.c_str(),
@@ -926,6 +937,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
 
     g_renderer = new Renderer(g_hwnd);
     g_net = new NetClient();
+    CrashSetStage("WinMain:netInit");
     Log("renderer+net created (WSAStartup done)");
     // 预读 config（IP + mode），使车机启动即应用所选连接模式
     // R-debug：读取结果同时缓存到全局 g_cfgIP，ConnThread 直接复用，避免其内再调 readConfig（真车闪退点）
