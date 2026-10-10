@@ -861,12 +861,21 @@ void NetClient::StartDiscovery() {
     // 这里用细粒度 stage 把 InitializeCriticalSection(&g_csCand) 与 LoadKnownPhones 两个
     // 最早的可能踩堆/踩临界区操作分开，下一次上车复测即可确定死在哪一步。
     CrashSetStage("Disc:enter");
+#if defined(TLTP_DISC_NONE)
+    // 【test18】StartDiscovery 入口即返回——隔离 InitCS(g_csCand)/LoadKnownPhones/线程 spawn 全部逻辑。
+    // 若 test18 仍死在 WM:preDiscLog 之前 → 元凶不在发现逻辑，是更早的破坏 + Log 触发。
+    Log("[dbg] disc: test18 DISC_NONE — StartDiscovery 立即返回");
+    return;
+#endif
     InitializeCriticalSection(&g_csCand);
     CrashSetStage("Disc:csCand");
     if (g_discoveryOn) return;
+#if !defined(TLTP_DISC_NO_LOADKNOWN)
     LoadKnownPhones();   // 启动时读取“记住的手机”，供本轮回合优先直连
+#endif
     CrashSetStage("Disc:loadKnown");
     g_discoveryOn = true;
+    CrashSetStage("Disc:flag");
 #if defined(TLTP_DISC_SOCK_MAIN)
     // 【test13/14】主线程预创建 socket（TLTP_DISC_BIND_MAIN 时连 bind 也在主线程做）——
     // 真车死亡窗口钉在 DiscoveryThread 的 socket()/bind() 一带（entered 之后、
@@ -893,7 +902,9 @@ void NetClient::StartDiscovery() {
     // dwStackSize（默认只有 64KB），而这两个探测线程栈上要放 std::vector<BYTE> buf
     // 等对象并调用 GetAdaptersInfo/probePort/sscanf，64KB 会溢出。
     // 症状同样是"进程瞬间消失、日志停在StartDiscovery 之前"。
+    CrashSetStage("Disc:spawnDisc");
     g_hDiscThread = TltpCreateThread(DiscoveryThread, NULL);
+    CrashSetStage("Disc:spawnDiscOk");
 #else
     // 【test9】真·无发现：连信标线程都不 spawn。旧 test4/5 的宏只挡了扫描线程，
     // 信标线程从未被关掉（日志可见 DiscoveryThread entered 照常出现）——结论作废。
@@ -904,8 +915,10 @@ void NetClient::StartDiscovery() {
     // R29：ADB 模式下彻底不跑子网扫描线程 —— 它内部唯一的网卡枚举用途是为
     // usb_net 推导候选，而 ADB 模式候选全来自 UDP 8687 信标（无需 GetAdaptersInfo，
     // 也避免并发踩堆导致 ConnThread 崩溃）。usb_net 模式仍照常扫描。
+    CrashSetStage("Disc:scanChk");
     if (!adbMode())
         g_hScanThread = TltpCreateThread(SubnetScanThread, NULL);
+    CrashSetStage("Disc:scanDone");
 }
 
 void NetClient::StopDiscovery() {

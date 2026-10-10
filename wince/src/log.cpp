@@ -1,6 +1,7 @@
 // log.cpp - 见 log.h
 // 把启动/连接里程碑与错误写入 EXE 同目录 tuptup.log，便于在车机 SD 卡上排查“启动卡死”等问题。
 #include "log.h"
+#include "crashlog.h"
 #include <windows.h>
 #include <stdarg.h>
 #include <string.h>
@@ -67,6 +68,13 @@ void LogInit() {
 
 void Log(const char* fmt, ...) {
     if (g_hLog == INVALID_HANDLE_VALUE) return;
+#ifdef TLTP_LOG_STAGES
+    // R36：Log 内部插桩——test9 的死点已钉在 "discovery started" 这条 Log 完成之前，
+    // 但 Log 已成功跑了十几条。这三个 stage 把 EnterCS / VSNPRINTF / WriteFile+flush
+    // 三段分开，下次崩溃时 crash.log 最后一行直接指出死在 Log 的哪一段。
+    // 代价：每条 Log 多 3 次 SD flush（启动期约 +0.5s），仅诊断构建启用。
+    CrashSetStage("Log:cs");
+#endif
     EnterCriticalSection(&g_csLog);
 
     char msg[384];
@@ -76,6 +84,9 @@ void Log(const char* fmt, ...) {
     if (n < 0) n = 0;
     if ((size_t)n > sizeof(msg) - 1) n = (int)(sizeof(msg) - 1);
     msg[n] = 0;
+#ifdef TLTP_LOG_STAGES
+    CrashSetStage("Log:fmt");
+#endif
 
     // 节流：内容完全相同的日志，5s 内只写一次。
     // 重连循环每轮会对多个候选各打一条 try/FAIL，手机没开 App 时每秒数条雷同日志持续写 SD 卡，
@@ -108,5 +119,8 @@ void Log(const char* fmt, ...) {
     DWORD age = now - g_startTick;
     if (age < 3000 || now - g_lastFlush > 2000) { FlushFileBuffers(g_hLog); g_lastFlush = now; }
 
+#ifdef TLTP_LOG_STAGES
+    CrashSetStage("Log:wrote");
+#endif
     LeaveCriticalSection(&g_csLog);
 }

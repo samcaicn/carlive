@@ -947,7 +947,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
 
     // 启动 UDP 自动发现（监听手机广播的 IP）
     NetClient::StartDiscovery();
+    CrashSetStage("WM:preDiscLog");
     Log("discovery started");
+    CrashSetStage("WM:postDiscLog");
 
     // 连接管理放到后台线程，主线程只跑消息泵 → 窗口可正常绘制/关闭，不再“启动卡死”
     // R23 关键修复：显式保留 128KB 线程栈（WinCE 忽略 dwStackSize，默认只有 64KB，
@@ -962,12 +964,15 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
     Sleep(3000);
     Log("[dbg] WinMain: 延迟结束，创建 ConnThread");
 #endif
+    CrashSetStage("WM:spawnConn");
     g_hConnThread = TltpCreateThread(ConnThread, NULL);
     if (!g_hConnThread) Log("FATAL: ConnThread CreateThread 失败 (err=%u), 仅界面运行", (unsigned)GetLastError());
     else Log("ConnThread created");
+    CrashSetStage("WM:connSpawned");
 
     // 主线程：永久消息泵
     MSG msg;
+    CrashSetStage("WM:pump");
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);

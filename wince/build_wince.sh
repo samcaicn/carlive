@@ -33,34 +33,42 @@ ls -la src || true
 VARIANT="${VARIANT:-test9}"
 case "$VARIANT" in
   test9)   # ADB, 真·无信标线程（对照）
-    EXTRA_FLAGS="-DTLTP_TEST9 -DTLTP_DISC_NO_THREAD"
+    EXTRA_FLAGS="-DTLTP_TEST9 -DTLTP_DISC_NO_THREAD -DTLTP_LOG_STAGES"
     EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
     OUT="$SCRIPT_DIR/test9.exe" ;;
   test10)  # ADB, 信标线程纯空转（无 Winsock）
-    EXTRA_FLAGS="-DTLTP_TEST10 -DTLTP_DISC_NO_SOCKET"
+    EXTRA_FLAGS="-DTLTP_TEST10 -DTLTP_DISC_NO_SOCKET -DTLTP_LOG_STAGES"
     EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
     OUT="$SCRIPT_DIR/test10.exe" ;;
   test11)  # ADB, 线程内仅 socket() 即退出
-    EXTRA_FLAGS="-DTLTP_TEST11 -DTLTP_DISC_SOCK_ONLY"
+    EXTRA_FLAGS="-DTLTP_TEST11 -DTLTP_DISC_SOCK_ONLY -DTLTP_LOG_STAGES"
     EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
     OUT="$SCRIPT_DIR/test11.exe" ;;
   test12)  # ADB, 线程内 socket, 无 bind, select 空转
-    EXTRA_FLAGS="-DTLTP_TEST12 -DTLTP_DISC_NO_BIND"
+    EXTRA_FLAGS="-DTLTP_TEST12 -DTLTP_DISC_NO_BIND -DTLTP_LOG_STAGES"
     EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
     OUT="$SCRIPT_DIR/test12.exe" ;;
   test13)  # ADB, 主线程 socket, 线程 bind+select
-    EXTRA_FLAGS="-DTLTP_TEST13 -DTLTP_DISC_SOCK_MAIN"
+    EXTRA_FLAGS="-DTLTP_TEST13 -DTLTP_DISC_SOCK_MAIN -DTLTP_LOG_STAGES"
     EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
     OUT="$SCRIPT_DIR/test13.exe" ;;
   test14)  # ADB, 主线程 socket+bind, 线程 select/recvfrom
-    EXTRA_FLAGS="-DTLTP_TEST14 -DTLTP_DISC_SOCK_MAIN -DTLTP_DISC_BIND_MAIN"
+    EXTRA_FLAGS="-DTLTP_TEST14 -DTLTP_DISC_SOCK_MAIN -DTLTP_DISC_BIND_MAIN -DTLTP_LOG_STAGES"
     EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
     OUT="$SCRIPT_DIR/test14.exe" ;;
   test15)  # ADB, 线程内自 WSAStartup + 全套正常
-    EXTRA_FLAGS="-DTLTP_TEST15 -DTLTP_DISC_WSA_SELF"
+    EXTRA_FLAGS="-DTLTP_TEST15 -DTLTP_DISC_WSA_SELF -DTLTP_LOG_STAGES"
     EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
     OUT="$SCRIPT_DIR/test15.exe" ;;
-  *) echo "ERROR: 未知 VARIANT=$VARIANT（支持: test9-15；test16 由 CI 单独从 wince-legacy/r13 构建）" >&2; exit 2 ;;
+  test17)  # R36：test9 基础上跳过 LoadKnownPhones —— 隔离 InitCS(g_csKnown)+known_phones.cfg 路径
+    EXTRA_FLAGS="-DTLTP_TEST17 -DTLTP_DISC_NO_THREAD -DTLTP_DISC_NO_LOADKNOWN -DTLTP_LOG_STAGES"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
+    OUT="$SCRIPT_DIR/test17.exe" ;;
+  test18)  # R36：StartDiscovery 入口即返回 —— 隔离 InitCS(g_csCand) 与全部发现逻辑
+    EXTRA_FLAGS="-DTLTP_TEST18 -DTLTP_DISC_NO_THREAD -DTLTP_DISC_NONE -DTLTP_LOG_STAGES"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
+    OUT="$SCRIPT_DIR/test18.exe" ;;
+  *) echo "ERROR: 未知 VARIANT=$VARIANT（支持: test9-15,17,18；test16 由 CI 单独从 wince-legacy/r13 构建）" >&2; exit 2 ;;
 esac
 
 echo ">> building $OUT  (VARIANT=$VARIANT)"
