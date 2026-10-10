@@ -105,7 +105,7 @@ jobs:
         run: |
           cd wince
           chmod +x build_wince.sh
-          for v in 9 10 11 12 13 14 15 17 18 19 20 24 25 26; do
+          for v in 9 10 11 12 13 14 15 17 18 19 20 24 25 26 27; do
             VARIANT=test$v ./build_wince.sh
           done
       - name: Build test16 (R13 legacy baseline rebuild @be6ff77)
@@ -128,7 +128,7 @@ jobs:
           cp GLOAI.exe ../../wince/test23.exe
       - name: Verify test9-20 + 23 + 24-26 PE (ARM WinCE, subsystem=9)
         run: |
-          for f in test9 test10 test11 test12 test13 test14 test15 test16 test17 test18 test19 test20 test23 test24 test25 test26; do
+          for f in test9 test10 test11 test12 test13 test14 test15 test16 test17 test18 test19 test20 test23 test24 test25 test26 test27; do
             ls -la wince/$f.exe
             /opt/cegcc-arm/bin/arm-mingw32ce-objdump -f wince/$f.exe \
               | grep -qi "architecture: arm" || { echo "ERROR: $f not ARM"; exit 1; }
@@ -159,6 +159,7 @@ jobs:
             wince/test24.exe
             wince/test25.exe
             wince/test26.exe
+            wince/test27.exe
 
   source-check:
     name: Source sanity check
