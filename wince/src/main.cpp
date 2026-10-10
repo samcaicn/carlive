@@ -17,6 +17,8 @@
 #include <string>
 #include <vector>
 
+extern "C" void InitHeapLock();   // R40：newlib malloc 全局锁初始化（见 malloc_lock.cpp）
+
 static NetClient* g_net = NULL;
 static Renderer* g_renderer = NULL;
 static Decoder  g_decoder;
@@ -831,7 +833,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
-    extern "C" void InitHeapLock();
     InitHeapLock();   // R40：最早（多线程启动前）初始化堆分配全局锁，根治 newlib malloc 非线程安全导致的堆损坏崩溃
     LogInit();
     // R24：尽早装上崩溃捕获。必须早于一切可能崩的调用——
