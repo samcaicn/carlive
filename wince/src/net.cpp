@@ -395,7 +395,13 @@ static bool GetAdaptersSafe(std::vector<BYTE>& buf) {
     for (int tries = 0; tries < 4; tries++) {
         ULONG cap = need * 2;          // 预留 2 倍，吸收 ROM 报告的偏差（核心修复点）
         if (cap > 256 * 1024) cap = 256 * 1024;
+#ifdef TLTP_NO_EXCEPT
+        // R41：-fno-exceptions 变体（test30/32）不能有 try/catch。operator new
+        // 已被 malloc_lock.cpp 改为永不返回 NULL（OOM 兜底 malloc(1)），resize 不会抛。
+        buf.resize(cap); if (buf.empty()) return false;
+#else
         try { buf.resize(cap); } catch (...) { return false; }
+#endif
         if (buf.empty()) return false;
         memset(&buf[0], 0, cap);
         ULONG r = GetAdaptersInfo((PIP_ADAPTER_INFO)&buf[0], &need);

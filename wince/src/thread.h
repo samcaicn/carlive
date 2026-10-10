@@ -33,7 +33,13 @@
 // 每个后台线程保留的栈（虚拟内存 reservation，不等于实际提交物理页，
 // WinCE 按需提交，所以给大值不会明显吃 RAM，但能彻底消除栈溢出）。
 // 128KB 足以覆盖 std::string/vector + Winsock + sscanf 的最深调用链。
+// R41：test28/29/30/32 用 TLTP_STACK_BIG 提到 512KB —— 若 128KB 仍不够
+// （renderer 拉伸/解码缓冲等深层路径），大栈变体能区分"栈溢出"与"堆破坏"。
+#ifdef TLTP_STACK_BIG
+#define TLTP_STACK_RESERVE (512 * 1024)
+#else
 #define TLTP_STACK_RESERVE (128 * 1024)
+#endif
 
 #ifdef _WIN32
 #if defined(TLTP_PLAIN_THREAD)

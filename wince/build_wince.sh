@@ -31,6 +31,8 @@ ls -la src || true
 #   test16 = R13 原版重建对照（源码 be6ff77，CI 单独步骤构建）
 # 各 exe 日志名按 EXE 名派生，互不覆盖。
 VARIANT="${VARIANT:-test9}"
+# R41：编译优化级别可按变体覆盖（test31 用 -O0 排除优化器/原子序问题）
+OPT="-O2"
 case "$VARIANT" in
   test9)   # ADB, 真·无信标线程（对照）
     EXTRA_FLAGS="-DTLTP_TEST9 -DTLTP_DISC_NO_THREAD -DTLTP_LOG_STAGES"
@@ -95,11 +97,32 @@ case "$VARIANT" in
     EXTRA_FLAGS="-DTLTP_TEST27 -DTLTP_UNIFY_FILELOCK -DTLTP_LOG_STAGES -DTLTP_MALLOC_LOCK"
     EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" "$SCRIPT_DIR/src/malloc_lock.cpp" )
     OUT="$SCRIPT_DIR/test27.exe" ;;
-  *) echo "ERROR: 未知 VARIANT=$VARIANT（支持: test9-15,17-20,24-27；test16 由 CI 单独从 wince-legacy/r13 构建；test23 由 r13proto 构建）" >&2; exit 2 ;;
+  test28)  # R41 候选A：test27 配方 + 512KB 大栈（TLTP_STACK_BIG）。128KB 若仍不够（renderer/解码深层路径），大栈区分"栈溢出"与"堆破坏"
+    EXTRA_FLAGS="-DTLTP_TEST28 -DTLTP_UNIFY_FILELOCK -DTLTP_LOG_STAGES -DTLTP_MALLOC_LOCK -DTLTP_STACK_BIG"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" "$SCRIPT_DIR/src/malloc_lock.cpp" )
+    OUT="$SCRIPT_DIR/test28.exe" ;;
+  test29)  # R41 候选B：test27 配方 + 大栈，但去掉 LOG_STAGES 逐行交叉写 + 彻底关 crash.log —— 最干净日志/文件路径
+    EXTRA_FLAGS="-DTLTP_TEST29 -DTLTP_MALLOC_LOCK -DTLTP_STACK_BIG -DTLTP_BISECT_NO_CRASHLOG"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" "$SCRIPT_DIR/src/malloc_lock.cpp" )
+    OUT="$SCRIPT_DIR/test29.exe" ;;
+  test30)  # R41 候选C：test27 配方 + 大栈 + -fno-exceptions -fno-rtti（CeGCC 展开器/RTTI 在线程里是真实嫌疑）
+    EXTRA_FLAGS="-DTLTP_TEST30 -DTLTP_UNIFY_FILELOCK -DTLTP_LOG_STAGES -DTLTP_MALLOC_LOCK -DTLTP_STACK_BIG -DTLTP_NO_EXCEPT -fno-exceptions -fno-rtti"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" "$SCRIPT_DIR/src/malloc_lock.cpp" )
+    OUT="$SCRIPT_DIR/test30.exe" ;;
+  test31)  # R41 诊断：test27 配方 + -O0（排除 O2 优化/原子序/miscompile；若 O0 活 O2 崩即编译器问题）
+    OPT="-O0"
+    EXTRA_FLAGS="-DTLTP_TEST31 -DTLTP_UNIFY_FILELOCK -DTLTP_LOG_STAGES -DTLTP_MALLOC_LOCK"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" "$SCRIPT_DIR/src/malloc_lock.cpp" )
+    OUT="$SCRIPT_DIR/test31.exe" ;;
+  test32)  # R41 全家桶（最大生存概率候选）：malloc锁 + 512KB大栈 + 无crashlog + no-exceptions/rtti
+    EXTRA_FLAGS="-DTLTP_TEST32 -DTLTP_MALLOC_LOCK -DTLTP_STACK_BIG -DTLTP_BISECT_NO_CRASHLOG -DTLTP_NO_EXCEPT -fno-exceptions -fno-rtti"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" "$SCRIPT_DIR/src/malloc_lock.cpp" )
+    OUT="$SCRIPT_DIR/test32.exe" ;;
+  *) echo "ERROR: 未知 VARIANT=$VARIANT（支持: test9-15,17-20,24-32；test16 由 CI 单独从 wince-legacy/r13 构建；test23 由 r13proto 构建）" >&2; exit 2 ;;
 esac
 
 echo ">> building $OUT  (VARIANT=$VARIANT)"
-"$CC" -O2 -Wall -Wno-unused-function $EXTRA_FLAGS \
+"$CC" $OPT -Wall -Wno-unused-function $EXTRA_FLAGS \
   "$SCRIPT_DIR/src/main.cpp" \
   "$SCRIPT_DIR/src/net.cpp" \
   "${EXTRA_SRC[@]+"${EXTRA_SRC[@]}"}" \
