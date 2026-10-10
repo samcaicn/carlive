@@ -406,6 +406,8 @@ static DWORD WINAPI ConnThread(LPVOID) {
     // R23 存活哨兵：这是本线程的第一条语句。若日志出现它，说明线程成功启动、
     // 且栈没有在入口就溢出。R23 修复后真车已能稳定打出这一行（此前停在它之前）。
     Log("[stage] ConnThread entered");
+    // R37：SAFE_NETCLIENT 模式下 g_net 为 NULL（构造被跳过），直接退出，仅保界面进程存活
+    if (!g_net) { Log("ConnThread: g_net=NULL，跳过连接（无网络诊断模式），线程退出"); return 0; }
     // R24：逐行标记当前步骤。R23 把栈从 64KB 提到 128KB 后线程成功进入，
     // 但随即死在下一行 —— 说明栈问题已解决，暴露的是第二个独立故障。
     // 到这里已经连续猜错三次（R21 猜OOM、R22 猜嵌套加锁、R23 猜栈），
@@ -935,8 +937,18 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
     if (crc.bottom > 0) g_cliH = crc.bottom;
     Log("client area %dx%d (handshake 上报此尺寸)", g_cliW, g_cliH);
 
+#ifndef TLTP_SAFE_RENDERER
     g_renderer = new Renderer(g_hwnd);
+#else
+    g_renderer = NULL;
+    Log("SAFE: Renderer 构造跳过 (g_renderer=NULL)");
+#endif
+#ifndef TLTP_SAFE_NETCLIENT
     g_net = new NetClient();
+#else
+    g_net = NULL;
+    Log("SAFE: NetClient 构造跳过 (g_net=NULL)");
+#endif
     CrashSetStage("WinMain:netInit");
     Log("renderer+net created (WSAStartup done)");
     // 预读 config（IP + mode），使车机启动即应用所选连接模式

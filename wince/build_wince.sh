@@ -68,7 +68,15 @@ case "$VARIANT" in
     EXTRA_FLAGS="-DTLTP_TEST18 -DTLTP_DISC_NO_THREAD -DTLTP_DISC_NONE -DTLTP_LOG_STAGES"
     EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
     OUT="$SCRIPT_DIR/test18.exe" ;;
-  *) echo "ERROR: 未知 VARIANT=$VARIANT（支持: test9-15,17,18；test16 由 CI 单独从 wince-legacy/r13 构建）" >&2; exit 2 ;;
+  test19)  # R37：接近成功候选 A —— 跳过 Renderer 构造 + StartDiscovery 仅置 flag（不 spawn/不 LoadKnownPhones），保留 ConnThread 连接逻辑
+    EXTRA_FLAGS="-DTLTP_TEST19 -DTLTP_DISC_NO_THREAD -DTLTP_DISC_NONE -DTLTP_SAFE_RENDERER -DTLTP_LOG_STAGES"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
+    OUT="$SCRIPT_DIR/test19.exe" ;;
+  test20)  # R37：诊断 —— 跳过 NetClient 构造（ConnThread 判空直接退出），进程存活对照，验证网络栈路径是否踩堆
+    EXTRA_FLAGS="-DTLTP_TEST20 -DTLTP_DISC_NO_THREAD -DTLTP_SAFE_NETCLIENT -DTLTP_LOG_STAGES"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
+    OUT="$SCRIPT_DIR/test20.exe" ;;
+  *) echo "ERROR: 未知 VARIANT=$VARIANT（支持: test9-15,17-20；test16 由 CI 单独从 wince-legacy/r13 构建；test23 由 r13proto 构建）" >&2; exit 2 ;;
 esac
 
 echo ">> building $OUT  (VARIANT=$VARIANT)"
