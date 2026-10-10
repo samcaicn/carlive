@@ -92,7 +92,7 @@ case "$VARIANT" in
   test27)  # R40 根因修复验证：FULL 功能 + 统一文件锁 + 逐行诊断 + malloc_lock.cpp（newlib malloc 全局串行化）
     # 假设根因 = CeGCC/newlib 的 malloc 非线程安全，多线程并发 new/delete 损坏堆 → 任意后续堆操作崩。
     # malloc_lock.cpp 给全局堆分配加递归 CS；若 test27 不崩且能连手机，则假设成立、定稿。
-    EXTRA_FLAGS="-DTLTP_TEST27 -DTLTP_UNIFY_FILELOCK -DTLTP_LOG_STAGES"
+    EXTRA_FLAGS="-DTLTP_TEST27 -DTLTP_UNIFY_FILELOCK -DTLTP_LOG_STAGES -DTLTP_MALLOC_LOCK"
     EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" "$SCRIPT_DIR/src/malloc_lock.cpp" )
     OUT="$SCRIPT_DIR/test27.exe" ;;
   *) echo "ERROR: 未知 VARIANT=$VARIANT（支持: test9-15,17-20,24-27；test16 由 CI 单独从 wince-legacy/r13 构建；test23 由 r13proto 构建）" >&2; exit 2 ;;

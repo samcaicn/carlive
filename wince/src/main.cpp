@@ -833,7 +833,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPTSTR, int) {
+#ifdef TLTP_MALLOC_LOCK
     InitHeapLock();   // R40：最早（多线程启动前）初始化堆分配全局锁，根治 newlib malloc 非线程安全导致的堆损坏崩溃
+#endif
     LogInit();
     // R24：尽早装上崩溃捕获。必须早于一切可能崩的调用——
     // 此前连续三次闪退（R21/R22/R23）都只能靠排除法猜，猜错三次。
