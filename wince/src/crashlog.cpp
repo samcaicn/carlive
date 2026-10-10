@@ -84,11 +84,17 @@ void CrashSetStage(const char* stage) {
     if (g_hCrash == INVALID_HANDLE_VALUE) { LeaveCriticalSection(&g_csCrash); return; }
     // 手工拼行：这里刻意不用 std::string / sprintf —— 本文件要在
     // "刚Detect 到低内存或栈已紧张" 的场景下也能工作，任何动态分配都可能二次崩溃。
-    char line[128];
+    char line[160];
     char hex[16];
     int  n = 0;
     const char* pfx = "[stage] ";
-    while (*pfx && n < (int)sizeof(line) - 24) line[n++] = *pfx++;
+    while (*pfx && n < (int)sizeof(line) - 32) line[n++] = *pfx++;
+    // R38：把线程 ID 写进每行，三角定位到底哪条线程在踩堆（主线程/ConnThread/DiscoveryThread）。
+    DWORD tid = GetCurrentThreadId();
+    line[n++] = '['; line[n++] = 't'; line[n++] = '=';
+    const char* d = "0123456789ABCDEF";
+    for (int i = 0; i < 8; i++) { line[n++] = d[(tid >> ((7 - i) * 4)) & 0xF]; }
+    line[n++] = ']'; line[n++] = ' ';
     const char* s = g_stage;
     while (*s && n < (int)sizeof(line) - 20) line[n++] = *s++;
     line[n++] = ' '; line[n++] = 't';

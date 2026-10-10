@@ -17,6 +17,13 @@
 static HANDLE   g_hLog = INVALID_HANDLE_VALUE;
 static DWORD    g_startTick = 0;
 static CRITICAL_SECTION g_csLog;
+// R38：金丝雀 —— 紧贴 g_csLog 上方放已知常量，侦测“越界写破坏 g_csLog 邻域”。
+// Log 进临界区前先校验，命中即把“被破坏发生在 [上一阶段→本阶段]”钉死并跳过 EnterCriticalSection（避免崩）。
+static volatile unsigned g_logCanary[4] = {0xCAFEBABEu, 0xCAFEBABEu, 0xCAFEBABEu, 0xCAFEBABEu};
+static bool LogCanaryIntact() {
+    return g_logCanary[0]==0xCAFEBABEu && g_logCanary[1]==0xCAFEBABEu
+        && g_logCanary[2]==0xCAFEBABEu && g_logCanary[3]==0xCAFEBABEu;
+}
 // 日志节流：完全相同内容的相邻日志 5s 内只落盘一次（见 Log 内注释）
 static char     g_lastMsg[384] = "";
 static DWORD    g_lastSameTick = 0;
@@ -68,6 +75,12 @@ void LogInit() {
 
 void Log(const char* fmt, ...) {
     if (g_hLog == INVALID_HANDLE_VALUE) return;
+    // R38：金丝雀校验——若 g_csLog 邻域已被越界写破坏，先记录再跳过 EnterCriticalSection，
+    // 避免进程消失，并精确定位“被破坏发生在进入本 Log 之前（即上一条成功 Log 与本 Log 之间）”。
+    if (!LogCanaryIntact()) {
+        CrashSetStage("CANARY_HIT:g_csLog邻域被破坏(写点在上一条Log之后)");
+        return;
+    }
 #ifdef TLTP_LOG_STAGES
     // R36：Log 内部插桩——test9 的死点已钉在 "discovery started" 这条 Log 完成之前，
     // 但 Log 已成功跑了十几条。这三个 stage 把 EnterCS / VSNPRINTF / WriteFile+flush
