@@ -101,11 +101,11 @@ jobs:
       image: ghcr.io/enlyze/windows-ce-build-environment-arm
     steps:
       - uses: actions/checkout@v4
-      - name: Build test9-15 + 17-20 variants (discovery-thread Winsock bisect + R36/R37 isolation)
+      - name: Build test9-15 + 17-20 + 24-26 variants (discovery-thread Winsock bisect + R36/R37 isolation + R39 fix candidates)
         run: |
           cd wince
           chmod +x build_wince.sh
-          for v in 9 10 11 12 13 14 15 17 18 19 20; do
+          for v in 9 10 11 12 13 14 15 17 18 19 20 24 25 26; do
             VARIANT=test$v ./build_wince.sh
           done
       - name: Build test16 (R13 legacy baseline rebuild @be6ff77)
@@ -126,9 +126,9 @@ jobs:
           cd wince-legacy/r13proto
           ./build_wince.sh
           cp GLOAI.exe ../../wince/test23.exe
-      - name: Verify test9-20 + 23 PE (ARM WinCE, subsystem=9)
+      - name: Verify test9-20 + 23 + 24-26 PE (ARM WinCE, subsystem=9)
         run: |
-          for f in test9 test10 test11 test12 test13 test14 test15 test16 test17 test18 test19 test20 test23; do
+          for f in test9 test10 test11 test12 test13 test14 test15 test16 test17 test18 test19 test20 test23 test24 test25 test26; do
             ls -la wince/$f.exe
             /opt/cegcc-arm/bin/arm-mingw32ce-objdump -f wince/$f.exe \
               | grep -qi "architecture: arm" || { echo "ERROR: $f not ARM"; exit 1; }
@@ -156,6 +156,9 @@ jobs:
             wince/test19.exe
             wince/test20.exe
             wince/test23.exe
+            wince/test24.exe
+            wince/test25.exe
+            wince/test26.exe
 
   source-check:
     name: Source sanity check

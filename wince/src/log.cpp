@@ -45,7 +45,12 @@ static void logPathFromModule(WCHAR* path, DWORD cap, const WCHAR* ext) {
 
 void LogInit() {
     g_startTick = GetTickCount();
+#ifndef TLTP_UNIFY_FILELOCK
     InitializeCriticalSection(&g_csLog);
+#else
+    // R39（test24）：日志与 crash.log 统一到同一把锁，消除跨锁并发写文件踩堆。
+    TltpFileInit();
+#endif
     WCHAR path[MAX_PATH] = {0};
     if (GetModuleFileName(NULL, path, MAX_PATH)) {
         logPathFromModule(path, MAX_PATH, L".log");
@@ -88,7 +93,11 @@ void Log(const char* fmt, ...) {
     // 代价：每条 Log 多 3 次 SD flush（启动期约 +0.5s），仅诊断构建启用。
     CrashSetStage("Log:cs");
 #endif
+#ifndef TLTP_UNIFY_FILELOCK
     EnterCriticalSection(&g_csLog);
+#else
+    TltpFileLock();
+#endif
 
     char msg[384];
     va_list ap; va_start(ap, fmt);
@@ -106,7 +115,14 @@ void Log(const char* fmt, ...) {
     // 既抢占单核 CPU 又加速闪存磨损；真正的状态变化（新 IP、连上、断开）不受影响。
     DWORD now = GetTickCount();
     if (strcmp(msg, g_lastMsg) == 0) {
-        if (now - g_lastSameTick < 5000) { LeaveCriticalSection(&g_csLog); return; }
+        if (now - g_lastSameTick < 5000) {
+#ifndef TLTP_UNIFY_FILELOCK
+            LeaveCriticalSection(&g_csLog);
+#else
+            TltpFileUnlock();
+#endif
+            return;
+        }
     } else {
         strncpy(g_lastMsg, msg, sizeof(g_lastMsg) - 1);
         g_lastMsg[sizeof(g_lastMsg) - 1] = 0;
@@ -135,5 +151,9 @@ void Log(const char* fmt, ...) {
 #ifdef TLTP_LOG_STAGES
     CrashSetStage("Log:wrote");
 #endif
+#ifndef TLTP_UNIFY_FILELOCK
     LeaveCriticalSection(&g_csLog);
+#else
+    TltpFileUnlock();
+#endif
 }

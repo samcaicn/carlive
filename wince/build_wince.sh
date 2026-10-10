@@ -76,7 +76,20 @@ case "$VARIANT" in
     EXTRA_FLAGS="-DTLTP_TEST20 -DTLTP_DISC_NO_THREAD -DTLTP_SAFE_NETCLIENT -DTLTP_LOG_STAGES"
     EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
     OUT="$SCRIPT_DIR/test20.exe" ;;
-  *) echo "ERROR: 未知 VARIANT=$VARIANT（支持: test9-15,17-20；test16 由 CI 单独从 wince-legacy/r13 构建；test23 由 r13proto 构建）" >&2; exit 2 ;;
+  test24)  # R39 修复候选A：FULL 功能（Renderer+NetClient+Discovery+ConnThread）+ 统一文件锁（TLTP_UNIFY_FILELOCK）
+    # 把 Log(gloai.log) 与 CrashSetStage(crash.log) 串行到同一把锁，消除跨锁并发写文件踩堆；保留全部诊断。
+    EXTRA_FLAGS="-DTLTP_TEST24 -DTLTP_UNIFY_FILELOCK -DTLTP_LOG_STAGES"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
+    OUT="$SCRIPT_DIR/test24.exe" ;;
+  test25)  # R39 修复候选B：FULL 功能 + 去掉 TLTP_LOG_STAGES（去掉每行交叉 crash 写），crash.log 仅 stage 变化时写
+    EXTRA_FLAGS="-DTLTP_TEST25"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
+    OUT="$SCRIPT_DIR/test25.exe" ;;
+  test26)  # R39 修复候选C：FULL 功能 + 彻底关掉 crash.log（TLTP_BISECT_NO_CRASHLOG）+ 去 TLTP_LOG_STAGES，单文件单锁最干净
+    EXTRA_FLAGS="-DTLTP_TEST26 -DTLTP_BISECT_NO_CRASHLOG"
+    EXTRA_SRC=( "$SCRIPT_DIR/src/adb.cpp" "$SCRIPT_DIR/src/rsa.cpp" )
+    OUT="$SCRIPT_DIR/test26.exe" ;;
+  *) echo "ERROR: 未知 VARIANT=$VARIANT（支持: test9-15,17-20,24-26；test16 由 CI 单独从 wince-legacy/r13 构建；test23 由 r13proto 构建）" >&2; exit 2 ;;
 esac
 
 echo ">> building $OUT  (VARIANT=$VARIANT)"

@@ -24,6 +24,20 @@
 
 static HANDLE g_hCrash = INVALID_HANDLE_VALUE;
 static char   g_stage[64] = "";
+
+// R39（test24）：统一文件写锁。Log(gloai.log) 与 CrashSetStage(crash.log) 共用这一把锁，
+// 把跨锁并发的两个文件句柄写串行化，消除 WinCE 内核堆踩踏。
+// 必须比任何 Log/CrashSetStage 调用都早初始化：WinMain 里 LogInit() 先于 CrashLogInit()
+// 执行，因此 TltpFileInit() 在 LogInit 里也会调一次（幂等，g_csFileInit 守卫）。
+#ifdef TLTP_UNIFY_FILELOCK
+static CRITICAL_SECTION g_csFile;
+static bool g_csFileInit = false;
+void TltpFileInit() {
+    if (!g_csFileInit) { InitializeCriticalSection(&g_csFile); g_csFileInit = true; }
+}
+void TltpFileLock()   { EnterCriticalSection(&g_csFile); }
+void TltpFileUnlock() { LeaveCriticalSection(&g_csFile); }
+#endif
 // R-debug：crashlog 被 WinMain / ConnThread / DiscoveryThread 并发写（g_stage 与 g_hCrash 均无锁），
 // 多线程同时写同一文件句柄+静态缓冲是数据竞争 → 会损坏堆/句柄，本身就可能引发或加剧闪退。
 // 加一把锁把整段写操作串行化（零平台依赖，WinCE 的 InitializeCriticalSection 稳定可用）。
@@ -73,15 +87,34 @@ static void openCrashFile(void) {
 
 void CrashSetStage(const char* stage) {
     if (!stage) return;
+#ifdef TLTP_UNIFY_FILELOCK
+    TltpFileInit();
+    EnterCriticalSection(&g_csFile);
+#else
     if (!g_csCrashInit) { InitializeCriticalSection(&g_csCrash); g_csCrashInit = true; }
     EnterCriticalSection(&g_csCrash);
+#endif
     // 绝大多数调用点是在循环里反复设同一个 stage。不比较的话每秒会写几十次盘，
     // 白白磨损 SD 卡闪存并抢占单核 CPU。比较后只有真正换步骤才落盘。
-    if (strcmp(g_stage, stage) == 0) { LeaveCriticalSection(&g_csCrash); return; }
+    if (strcmp(g_stage, stage) == 0) {
+#ifdef TLTP_UNIFY_FILELOCK
+        LeaveCriticalSection(&g_csFile);
+#else
+        LeaveCriticalSection(&g_csCrash);
+#endif
+        return;
+    }
     safeCpy(g_stage, stage, sizeof(g_stage));
 
     openCrashFile();
-    if (g_hCrash == INVALID_HANDLE_VALUE) { LeaveCriticalSection(&g_csCrash); return; }
+    if (g_hCrash == INVALID_HANDLE_VALUE) {
+#ifdef TLTP_UNIFY_FILELOCK
+        LeaveCriticalSection(&g_csFile);
+#else
+        LeaveCriticalSection(&g_csCrash);
+#endif
+        return;
+    }
     // 手工拼行：这里刻意不用 std::string / sprintf —— 本文件要在
     // "刚Detect 到低内存或栈已紧张" 的场景下也能工作，任何动态分配都可能二次崩溃。
     char line[160];
@@ -109,7 +142,11 @@ void CrashSetStage(const char* stage) {
     // 必须每次 flush：崩溃时进程直接消失，缓冲区里的内容会一起丢。
     // 这是本方案存在的全部意义 —— 落盘时机必须与崩溃无关。
     FlushFileBuffers(g_hCrash);
+#ifdef TLTP_UNIFY_FILELOCK
+    LeaveCriticalSection(&g_csFile);
+#else
     LeaveCriticalSection(&g_csCrash);
+#endif
     (void)hex;
 }
 

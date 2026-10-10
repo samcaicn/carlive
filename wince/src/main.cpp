@@ -149,6 +149,18 @@ static const WCHAR* EXE_TAGW = L"test18";
 #elif defined(TLTP_TEST19)
 static const char*  EXE_TAG  = "test19";
 static const WCHAR* EXE_TAGW = L"test19";
+#elif defined(TLTP_TEST20)
+static const char*  EXE_TAG  = "test20";
+static const WCHAR* EXE_TAGW = L"test20";
+#elif defined(TLTP_TEST24)
+static const char*  EXE_TAG  = "test24";
+static const WCHAR* EXE_TAGW = L"test24";
+#elif defined(TLTP_TEST25)
+static const char*  EXE_TAG  = "test25";
+static const WCHAR* EXE_TAGW = L"test25";
+#elif defined(TLTP_TEST26)
+static const char*  EXE_TAG  = "test26";
+static const WCHAR* EXE_TAGW = L"test26";
 #elif defined(USB_NET_ONLY)
 static const char*  EXE_TAG  = "usbnet";
 static const WCHAR* EXE_TAGW = L"usbnet";

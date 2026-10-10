@@ -62,3 +62,17 @@ void CrashSetStage(const char* stage);
 #else
 #define TLTP_PROBE(s) ((void)0)
 #endif
+
+// 【修复候选 test24 / R39】统一文件写锁。
+// 根因面：Log() 写 gloai.log（锁 g_csLog），CrashSetStage() 写 crash.log（锁 g_csCrash），
+// 这是两把**不同**的锁，于是主线程 + 后台线程可对两个文件句柄真正并发
+// WriteFile+FlushFileBuffers，踩坏 WinCE 内核堆 → 下一次 EnterCriticalSection(&g_csLog)
+// 崩（详见 R38 诊断结论）。test24 把两类写统一到同一把锁 g_csFile 串行化，
+// 既保留全部诊断（含 TLTP_LOG_STAGES 的逐行 Log:cs/fmt/wrote），又消除跨锁并发。
+// 函数声明不暴露 CRITICAL_SECTION 类型（避免头文件引入 <windows.h> 顺序问题），
+// g_csFile 实体与初始化都放在 crashlog.cpp。
+#ifdef TLTP_UNIFY_FILELOCK
+void TltpFileInit();
+void TltpFileLock();
+void TltpFileUnlock();
+#endif
